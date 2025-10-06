@@ -1,8 +1,10 @@
 # -*- coding: utf-8 -*-
 """
 ГК РФ — GUI-индексатор (RTF/PDF/DOCX/TXT) → Qdrant + OpenAI
-Версия v3.7 (release):
-- Обогащение summary через GPT-5-nano (Responses API, reasoning.effort=minimal, verbosity=low) + фоллбэк на Chat.
+Версия v4.0 (release):
+- Полностью обновлённый интерфейс на PySide6 с современным тёмным стилем и боковой навигацией.
+- Подсказки и пояснения к каждой настройке: от импорта до поиска и Vector Lab.
+- Расширенный анализ исходных документов, визуальные карточки результатов и Vector Lab для экспериментов.
 - Stream upsert (батчами) без роста RAM; кэш эмбеддингов (SQLite).
 - Переключатели HyDE и GPT-rerank; адаптивный вес title для «ст. NNN».
 - Ленивая прогревка кэша + индикатор; кнопка «Очистить кэш».
@@ -32,7 +34,8 @@ from typing import List, Optional, Tuple, Dict, Any
 from datetime import datetime
 
 # ---- Qt ----
-from PyQt5 import QtWidgets, QtGui, QtCore
+from PySide6 import QtWidgets, QtGui, QtCore
+from PySide6.QtCore import Qt
 
 # ---- RTF parsers (robust import) ----
 try:
@@ -92,6 +95,112 @@ VECTOR_SIZE = 3072
 BASE_COLLECTION = "gk_full"
 COLL_ARTICLES = f"{BASE_COLLECTION}_articles"  # named vectors (title_vec + body_vec)
 COLL_CHUNKS   = f"{BASE_COLLECTION}_chunks"    # named vectors (title_vec + body_vec)
+
+APP_STYLESHEET = """
+* {
+    font-family: 'Inter', 'Segoe UI', 'SF Pro Display', sans-serif;
+    font-size: 14px;
+}
+QWidget {
+    background-color: #0f172a;
+    color: #e2e8f0;
+}
+QScrollArea {
+    background: transparent;
+    border: none;
+}
+QLabel#Headline {
+    font-size: 28px;
+    font-weight: 700;
+    letter-spacing: 0.4px;
+    padding-bottom: 12px;
+}
+QLabel#SubHeadline {
+    font-size: 16px;
+    color: #9ca3af;
+}
+QLabel#SectionTitle {
+    font-size: 18px;
+    font-weight: 600;
+    color: #f8fafc;
+    margin-bottom: 8px;
+}
+QLabel#OptionLabel {
+    font-weight: 600;
+    color: #f1f5f9;
+}
+QLabel#OptionHint {
+    color: #94a3b8;
+    line-height: 1.4em;
+}
+QFrame#Card {
+    background-color: rgba(15, 23, 42, 0.6);
+    border: 1px solid rgba(148, 163, 184, 0.16);
+    border-radius: 14px;
+    padding: 16px;
+}
+QFrame#HeroCard {
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+        stop:0 #1e3a8a,
+        stop:1 #0ea5e9);
+    border-radius: 18px;
+    padding: 22px;
+    color: #f8fafc;
+}
+QPushButton {
+    background-color: #2563eb;
+    border-radius: 10px;
+    padding: 9px 16px;
+    font-weight: 600;
+}
+QPushButton:hover {
+    background-color: #3b82f6;
+}
+QPushButton:disabled {
+    background-color: #1e293b;
+    color: #64748b;
+}
+QLineEdit, QPlainTextEdit, QTextEdit, QComboBox, QSpinBox,
+QDoubleSpinBox, QDateEdit, QListWidget, QTableWidget, QTextBrowser {
+    background-color: rgba(15, 23, 42, 0.8);
+    border: 1px solid rgba(148, 163, 184, 0.25);
+    border-radius: 10px;
+    padding: 8px 10px;
+    selection-background-color: #2563eb;
+    selection-color: #f8fafc;
+}
+QListWidget::item {
+    padding: 10px;
+}
+QListWidget::item:selected {
+    background-color: rgba(37, 99, 235, 0.18);
+    color: #f8fafc;
+}
+QProgressBar {
+    border: 1px solid rgba(148, 163, 184, 0.2);
+    border-radius: 10px;
+    background-color: rgba(15, 23, 42, 0.6);
+    text-align: center;
+    color: #cbd5f5;
+}
+QProgressBar::chunk {
+    border-radius: 10px;
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+        stop:0 #3b82f6,
+        stop:1 #38bdf8);
+}
+QToolButton {
+    background-color: rgba(15, 23, 42, 0.7);
+    border: 1px solid rgba(148, 163, 184, 0.2);
+    border-radius: 10px;
+    padding: 6px 10px;
+}
+QSplitter::handle {
+    background-color: rgba(148, 163, 184, 0.2);
+    width: 3px;
+    margin: 0 6px;
+}
+"""
 
 ARTICLE_HDR_RE = re.compile(r"(?m)^\s*Статья\s+(\d+(?:\.\d+)*)\s*\.?\s*(.+)?$")
 CHAPTER_HDR_RE = re.compile(r"(?m)^\s*Глава\s+(\d+(?:\.\d+)*)\s*\.?\s*(.+)?$")
@@ -980,9 +1089,9 @@ def combine_rrf_weighted(title_rrf: Dict[str,float], body_rrf: Dict[str,float], 
 # Поток индексации (stream)
 # ============================
 class IndexWorker(QtCore.QThread):
-    progressChanged = QtCore.pyqtSignal(int, str)  # percent, message
-    finishedOk = QtCore.pyqtSignal(str)
-    failed = QtCore.pyqtSignal(str)
+    progressChanged = QtCore.Signal(int, str)  # percent, message
+    finishedOk = QtCore.Signal(str)
+    failed = QtCore.Signal(str)
 
     def __init__(self, api_key: str, articles: List[LawDoc], chunks: List[LawDoc],
                  do_articles: bool, do_chunks: bool, batch: int,
@@ -1074,10 +1183,11 @@ class QueryEmbedder:
 class MainWindow(QtWidgets.QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("ГК РФ — Индексатор v3.8 · Vector Studio")
-        self.resize(1420, 980)
-
-        self.apply_modern_style()
+        self.setWindowTitle("ГК РФ — Индексатор v4 · Vector Studio")
+        self.resize(1480, 960)
+        self.setMinimumSize(1280, 840)
+        self.setAttribute(Qt.WA_StyledBackground, True)
+        self.setStyleSheet(APP_STYLESHEET)
 
         self.selected_files: List[str] = []
         self.chunks: List[LawDoc] = []
@@ -1085,92 +1195,175 @@ class MainWindow(QtWidgets.QMainWindow):
         self.analysis_per_file: Dict[str, Dict[str, Any]] = {}
         self.search_cache: Optional[SearchCache] = None
         self._last_vector: Optional[List[float]] = None
+        self._last_rag_blocks: List[str] = []
 
-        self.tabs = QtWidgets.QTabWidget()
-        self.setCentralWidget(self.tabs)
+        central = QtWidgets.QWidget()
+        central_layout = QtWidgets.QVBoxLayout(central)
+        central_layout.setContentsMargins(24, 20, 24, 24)
+        central_layout.setSpacing(18)
+        self.setCentralWidget(central)
 
-        self.tab_import = QtWidgets.QWidget()
-        self.tab_index  = QtWidgets.QWidget()
-        self.tab_search = QtWidgets.QWidget()
-        self.tab_tests  = QtWidgets.QWidget()
-        self.tab_vectors = QtWidgets.QWidget()
-        self.tabs.addTab(self.tab_import, "Импорт")
-        self.tabs.addTab(self.tab_index,  "Индексация")
-        self.tabs.addTab(self.tab_search, "Поиск")
-        self.tabs.addTab(self.tab_tests,  "Тесты")
-        self.tabs.addTab(self.tab_vectors, "Vector Lab")
+        central_layout.addWidget(self.create_hero_banner())
 
-        self.setup_import_tab()
-        self.setup_index_tab()
-        self.setup_search_tab()
-        self.setup_tests_tab()
-        self.setup_vector_lab_tab()
+        body = QtWidgets.QHBoxLayout()
+        body.setSpacing(18)
+        body.setContentsMargins(0, 0, 0, 0)
+        central_layout.addLayout(body, 1)
 
-        self.log_box = QtWidgets.QPlainTextEdit(); self.log_box.setReadOnly(True)
-        self.tabs.addTab(self.log_box, "Лог")
+        self.nav_list = QtWidgets.QListWidget()
+        self.configure_nav_list()
+        body.addWidget(self.nav_list)
 
-        self.index_thread: Optional[IndexWorker] = None
+        self.page_container = QtWidgets.QFrame()
+        page_layout = QtWidgets.QVBoxLayout(self.page_container)
+        page_layout.setContentsMargins(0, 0, 0, 0)
+        page_layout.setSpacing(16)
+        body.addWidget(self.page_container, 1)
+
+        self.page_hint = QtWidgets.QLabel()
+        self.page_hint.setObjectName("SubHeadline")
+        self.page_hint.setWordWrap(True)
+        page_layout.addWidget(self.page_hint)
+
+        self.stack = QtWidgets.QStackedWidget()
+        page_layout.addWidget(self.stack, 1)
+
+        self.nav_list.currentRowChanged.connect(self.stack.setCurrentIndex)
+        self.nav_list.currentRowChanged.connect(self.on_page_changed)
+
+        import_page = self.build_import_page()
+        self.register_page("📥 Импорт", "Загружайте документы и сразу видите аналитику текста перед векторизацией.", import_page)
+
+        index_page = self.build_index_page()
+        self.register_page("⚙️ Индексация", "Готовьте батчи и отправляйте документы в Qdrant с подсказками по ключевым настройкам.", index_page)
+
+        search_page = self.build_search_page()
+        self.register_page("🔍 Поиск", "Тестируйте поиск по векторной базе с подсказками HyDE, rerank и фильтрами по дате.", search_page)
+
+        vector_page = self.build_vector_lab_page()
+        self.register_page("🧪 Vector Lab", "Исследуйте эмбеддинги и проверяйте выдачу Qdrant прямо из приложения.", vector_page)
+
+        tests_page = self.build_tests_page()
+        self.register_page("🧭 Тесты", "Быстро проверяйте типовые запросы и сравнивайте ответы.", tests_page)
+
+        log_page = self.build_log_page()
+        self.register_page("📘 Лог", "Все действия приложения фиксируются здесь — удобно проверять ход индексации.", log_page)
+
+        self.nav_list.setCurrentRow(0)
 
         self.status = self.statusBar()
         self.cache_progress_lbl = QtWidgets.QLabel("Кэш не прогрет")
         self.status.addWidget(self.cache_progress_lbl)
 
-    # ---------- Utils ----------
-    def apply_modern_style(self):
-        palette = self.palette()
-        base_color = QtGui.QColor(36, 41, 47)
-        accent = QtGui.QColor(10, 132, 255)
-        text_color = QtGui.QColor(240, 240, 240)
-        panel = QtGui.QColor(46, 52, 60)
-        palette.setColor(QtGui.QPalette.Window, base_color)
-        palette.setColor(QtGui.QPalette.WindowText, text_color)
-        palette.setColor(QtGui.QPalette.Base, QtGui.QColor(30, 33, 40))
-        palette.setColor(QtGui.QPalette.AlternateBase, QtGui.QColor(40, 44, 52))
-        palette.setColor(QtGui.QPalette.ToolTipBase, text_color)
-        palette.setColor(QtGui.QPalette.ToolTipText, QtGui.QColor(20, 20, 20))
-        palette.setColor(QtGui.QPalette.Text, text_color)
-        palette.setColor(QtGui.QPalette.Button, panel)
-        palette.setColor(QtGui.QPalette.ButtonText, text_color)
-        palette.setColor(QtGui.QPalette.Highlight, accent)
-        palette.setColor(QtGui.QPalette.HighlightedText, QtGui.QColor(255, 255, 255))
-        self.setPalette(palette)
-        font = self.font()
-        font.setPointSize(11)
-        self.setFont(font)
-        self.setStyleSheet("""
-            QWidget { color: #f0f0f0; }
-            QTabWidget::pane { border: 1px solid #1f232a; background:#1f232a; }
-            QPushButton {
-                background-color: #0a84ff;
-                color: #ffffff;
-                border-radius: 6px;
-                padding: 6px 12px;
-            }
-            QPushButton:disabled { background-color: #3a3f47; color: #888; }
-            QPushButton:hover { background-color: #479dff; }
-            QLineEdit, QPlainTextEdit, QTextEdit, QComboBox, QSpinBox, QDateEdit, QDoubleSpinBox {
-                background-color: #242933;
-                border: 1px solid #343b45;
-                border-radius: 6px;
-                padding: 6px;
-            }
-            QListWidget, QTableWidget, QTextBrowser {
-                background-color: #1f232a;
-                border: 1px solid #343b45;
-                border-radius: 6px;
-            }
-            QProgressBar {
-                border: 1px solid #343b45;
-                border-radius: 6px;
-                text-align: center;
-                background: #1f232a;
-            }
-            QProgressBar::chunk { background-color: #0a84ff; border-radius: 6px; }
-        """)
+        self.index_thread: Optional[IndexWorker] = None
+
+    # ---------- UI helpers ----------
+    def create_hero_banner(self) -> QtWidgets.QFrame:
+        frame = QtWidgets.QFrame()
+        frame.setObjectName("HeroCard")
+        layout = QtWidgets.QVBoxLayout(frame)
+        layout.setContentsMargins(28, 22, 28, 22)
+        layout.setSpacing(8)
+        title = QtWidgets.QLabel("Vector Studio для ГК РФ")
+        title.setObjectName("Headline")
+        subtitle = QtWidgets.QLabel(
+            "Импортируйте кодекс, обогащайте описания, создавайте эмбеддинги и тестируйте выдачу — всё в одном окне."
+        )
+        subtitle.setObjectName("SubHeadline")
+        subtitle.setWordWrap(True)
+        layout.addWidget(title)
+        layout.addWidget(subtitle)
+        return frame
+
+    def configure_nav_list(self):
+        self.nav_list.setObjectName("NavigationList")
+        self.nav_list.setFixedWidth(260)
+        self.nav_list.setSpacing(6)
+        self.nav_list.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
+        self.nav_list.setAlternatingRowColors(False)
+
+    def register_page(self, title: str, subtitle: str, widget: QtWidgets.QWidget):
+        scroll = QtWidgets.QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
+
+        wrapper = QtWidgets.QWidget()
+        wrapper_layout = QtWidgets.QVBoxLayout(wrapper)
+        wrapper_layout.setContentsMargins(4, 0, 20, 40)
+        wrapper_layout.setSpacing(18)
+        wrapper_layout.addWidget(widget)
+        wrapper_layout.addStretch(1)
+        scroll.setWidget(wrapper)
+
+        self.stack.addWidget(scroll)
+
+        item = QtWidgets.QListWidgetItem(title)
+        item.setData(Qt.UserRole, subtitle)
+        item.setToolTip(subtitle)
+        self.nav_list.addItem(item)
+
+    def on_page_changed(self, row: int):
+        if row < 0:
+            self.page_hint.clear()
+            return
+        item = self.nav_list.item(row)
+        hint = item.data(Qt.UserRole) if item else ""
+        self.page_hint.setText(hint)
+
+    def section_header(self, title: str, subtitle: str) -> QtWidgets.QWidget:
+        container = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(container)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(4)
+        lbl = QtWidgets.QLabel(title)
+        lbl.setObjectName("SectionTitle")
+        sub = QtWidgets.QLabel(subtitle)
+        sub.setObjectName("SubHeadline")
+        sub.setWordWrap(True)
+        layout.addWidget(lbl)
+        layout.addWidget(sub)
+        return container
+
+    def create_card(self) -> QtWidgets.QFrame:
+        frame = QtWidgets.QFrame()
+        frame.setObjectName("Card")
+        layout = QtWidgets.QVBoxLayout(frame)
+        layout.setContentsMargins(24, 20, 24, 20)
+        layout.setSpacing(14)
+        return frame
+
+    def add_option_row(self, grid: QtWidgets.QGridLayout, row: int, label: str,
+                        widget: QtWidgets.QWidget, description: str) -> int:
+        title = QtWidgets.QLabel(label)
+        title.setObjectName("OptionLabel")
+        title.setAlignment(Qt.AlignTop)
+        grid.addWidget(title, row, 0)
+        grid.addWidget(widget, row, 1)
+        hint = QtWidgets.QLabel(description)
+        hint.setObjectName("OptionHint")
+        hint.setWordWrap(True)
+        grid.addWidget(hint, row + 1, 0, 1, 2)
+        widget.setToolTip(description)
+        return row + 2
+
+    def add_toggle_row(self, grid: QtWidgets.QGridLayout, row: int, title: str,
+                        checkbox: QtWidgets.QCheckBox, description: str) -> int:
+        label = QtWidgets.QLabel(title)
+        label.setObjectName("OptionLabel")
+        label.setAlignment(Qt.AlignTop)
+        grid.addWidget(label, row, 0)
+        grid.addWidget(checkbox, row, 1)
+        hint = QtWidgets.QLabel(description)
+        hint.setObjectName("OptionHint")
+        hint.setWordWrap(True)
+        grid.addWidget(hint, row + 1, 0, 1, 2)
+        checkbox.setToolTip(description)
+        return row + 2
 
     def log(self, msg: str):
         ts = datetime.now().strftime("%H:%M:%S")
-        self.log_box.appendPlainText(f"[{ts}] {msg}")
+        if hasattr(self, "log_box"):
+            self.log_box.appendPlainText(f"[{ts}] {msg}")
         logger.info(msg)
 
     def update_analysis_view(self, path: str):
@@ -1203,89 +1396,226 @@ class MainWindow(QtWidgets.QMainWindow):
         self.analysis_summary.setText(txt)
 
     # ---------- Import ----------
-    def setup_import_tab(self):
-        lay = QtWidgets.QVBoxLayout(self.tab_import)
+    def build_import_page(self) -> QtWidgets.QWidget:
+        page = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(page)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(18)
 
-        header = QtWidgets.QHBoxLayout()
-        self.btn_add = QtWidgets.QPushButton("Добавить источники…"); self.btn_add.clicked.connect(self.add_files)
-        self.btn_clear = QtWidgets.QPushButton("Очистить список"); self.btn_clear.clicked.connect(self.clear_files)
+        layout.addWidget(self.section_header(
+            "Импорт документов",
+            "Шаг первый: соберите исходники. Приложение само подскажет, где слишком много токенов, где нет ссылок и какие ключевые темы внутри."
+        ))
+
+        hero_card = self.create_card()
+        hero_layout = hero_card.layout()
+        intro = QtWidgets.QLabel(
+            "<b>Как работает импорт:</b><br>"
+            "1. Добавьте RTF/PDF/DOCX/TXT с текстами кодекса.<br>"
+            "2. При необходимости скорректируйте название и параметры чанкинга.<br>"
+            "3. Нажмите «Подготовить корпус», чтобы получить статьи и чанки."
+        )
+        intro.setWordWrap(True)
+        intro.setObjectName("OptionHint")
+        hero_layout.addWidget(intro)
+        layout.addWidget(hero_card)
+
+        options_card = self.create_card()
+        options_layout = options_card.layout()
+
+        buttons_row = QtWidgets.QHBoxLayout()
+        self.btn_add = QtWidgets.QPushButton("Добавить файлы…")
+        self.btn_add.clicked.connect(self.add_files)
+        self.btn_add.setToolTip("Откроет диалог выбора документов. Поддерживаются форматы RTF, PDF, DOCX и TXT.")
+        self.btn_clear = QtWidgets.QPushButton("Очистить список")
+        self.btn_clear.clicked.connect(self.clear_files)
+        self.btn_clear.setToolTip("Удаляет все выбранные документы из списка, чтобы начать заново.")
         self.btn_parse = QtWidgets.QPushButton("Подготовить корпус")
         self.btn_parse.clicked.connect(self.parse_and_chunk)
-        header.addWidget(self.btn_add)
-        header.addWidget(self.btn_clear)
-        header.addStretch(1)
-        header.addWidget(self.btn_parse)
+        self.btn_parse.setToolTip("Разбирает документы на статьи и чанки, вычисляет метаданные и готовит корпус к индексации.")
+        buttons_row.addWidget(self.btn_add)
+        buttons_row.addWidget(self.btn_clear)
+        buttons_row.addStretch(1)
+        buttons_row.addWidget(self.btn_parse)
+        options_layout.addLayout(buttons_row)
 
-        splitter = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
+        hint = QtWidgets.QLabel(
+            "Если вы добавляете несколько файлов, приложение автоматически угадает часть кодекса и объединит статьи."
+        )
+        hint.setObjectName("OptionHint")
+        hint.setWordWrap(True)
+        options_layout.addWidget(hint)
 
-        left_widget = QtWidgets.QWidget()
-        left_layout = QtWidgets.QVBoxLayout(left_widget)
+        params_widget = QtWidgets.QWidget()
+        params_grid = QtWidgets.QGridLayout(params_widget)
+        params_grid.setColumnStretch(1, 1)
+        params_grid.setHorizontalSpacing(18)
+        params_grid.setVerticalSpacing(10)
+
+        self.ed_code = QtWidgets.QLineEdit("ГК РФ")
+        row = 0
+        row = self.add_option_row(
+            params_grid,
+            row,
+            "Кодекс (payload code)",
+            self.ed_code,
+            "Короткое имя пойдёт в поле payload['code']. Используется для фильтрации в Qdrant и в заголовках."
+        )
+
+        self.ed_title = QtWidgets.QLineEdit("Гражданский кодекс Российской Федерации")
+        row = self.add_option_row(
+            params_grid,
+            row,
+            "Полное название",
+            self.ed_title,
+            "Будет показано в карточках результатов и сохранено в payload['title']. Помогает понимать, какой документ перед нами."
+        )
+
+        self.spin_chunk = QtWidgets.QSpinBox()
+        self.spin_chunk.setRange(200, 4000)
+        self.spin_chunk.setValue(800)
+        row = self.add_option_row(
+            params_grid,
+            row,
+            "Размер чанка",
+            self.spin_chunk,
+            "Примерное количество токенов в одном фрагменте. Большие чанки сохраняют контекст, а меньшие повышают точность поиска."
+        )
+
+        self.spin_overlap = QtWidgets.QSpinBox()
+        self.spin_overlap.setRange(0, 1200)
+        self.spin_overlap.setValue(120)
+        row = self.add_option_row(
+            params_grid,
+            row,
+            "Перекрытие чанков",
+            self.spin_overlap,
+            "Чем больше overlap, тем плавнее фрагменты передают контекст между собой. Ноль отключает перекрытие."
+        )
+
+        self.chk_gpt_summ = QtWidgets.QCheckBox("Включить обогащение")
+        self.chk_summ_articles_only = QtWidgets.QCheckBox("Только для статей")
+        self.chk_summ_articles_only.setChecked(True)
+        row = self.add_toggle_row(
+            params_grid,
+            row,
+            "GPT-резюме",
+            self.chk_gpt_summ,
+            "Если включить, для каждого фрагмента будет сделан краткий summary через GPT-5-nano. Это быстрее понимается в поиске, но стоит дороже."
+        )
+        row = self.add_toggle_row(
+            params_grid,
+            row,
+            "Ограничить обогащение",
+            self.chk_summ_articles_only,
+            "Когда включено, summary строятся только для статей. Снимите флаг, если нужно обогащать и короткие чанки."
+        )
+
+        self.eff_from = QtWidgets.QDateEdit()
+        self.eff_from.setCalendarPopup(True)
+        self.eff_from.setDisplayFormat("yyyy-MM-dd")
+        self.eff_from.setDate(QtCore.QDate(2000, 1, 1))
+        self.eff_from.setSpecialValueText("")
+        row = self.add_option_row(
+            params_grid,
+            row,
+            "Дата начала действия",
+            self.eff_from,
+            "Укажите, с какого дня норма действует. Это попадёт в payload['effective_from'] и поможет фильтрам по дате."
+        )
+
+        self.eff_to = QtWidgets.QDateEdit()
+        self.eff_to.setCalendarPopup(True)
+        self.eff_to.setDisplayFormat("yyyy-MM-dd")
+        self.eff_to.setDate(QtCore.QDate(2100, 1, 1))
+        self.eff_to.setSpecialValueText("")
+        row = self.add_option_row(
+            params_grid,
+            row,
+            "Дата окончания",
+            self.eff_to,
+            "Заполните, если норма утрачивает силу к конкретной дате. Незаполненное поле значит 'действует бессрочно'."
+        )
+
+        self.eff_status = QtWidgets.QComboBox()
+        self.eff_status.addItems(["действует", "утратил силу", "не вступил в силу"])
+        row = self.add_option_row(
+            params_grid,
+            row,
+            "Статус нормы",
+            self.eff_status,
+            "Помогает отслеживать актуальность нормы. Статус пишется в payload['status'] и используется в фильтрах поиска."
+        )
+
+        options_layout.addWidget(params_widget)
+        layout.addWidget(options_card)
+
+        analysis_card = self.create_card()
+        analysis_layout = analysis_card.layout()
+        analysis_layout.addWidget(self.section_header(
+            "Анализ источников",
+            "Слева список файлов, справа — метрики, найденные ссылки и предпросмотр. Даже ребёнок увидит, что происходит."
+        ))
+
+        splitter = QtWidgets.QSplitter(Qt.Horizontal)
+
+        left_panel = QtWidgets.QWidget()
+        left_layout = QtWidgets.QVBoxLayout(left_panel)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+        left_layout.setSpacing(10)
         lbl_files = QtWidgets.QLabel("Выбранные документы")
-        lbl_files.setStyleSheet("font-weight:600;margin-bottom:4px;")
+        lbl_files.setObjectName("OptionLabel")
+        left_layout.addWidget(lbl_files)
+        files_hint = QtWidgets.QLabel("Выбирайте файл, чтобы увидеть его статистику и фрагмент текста.")
+        files_hint.setObjectName("OptionHint")
+        files_hint.setWordWrap(True)
+        left_layout.addWidget(files_hint)
         self.files_list = QtWidgets.QListWidget()
         self.files_list.currentItemChanged.connect(self.on_current_file_changed)
-        left_layout.addWidget(lbl_files)
-        left_layout.addWidget(self.files_list)
+        left_layout.addWidget(self.files_list, 1)
 
-        right_widget = QtWidgets.QWidget()
-        right_layout = QtWidgets.QVBoxLayout(right_widget)
-
-        self.preview = QtWidgets.QPlainTextEdit()
-        self.preview.setPlaceholderText("Предпросмотр текста…")
-        self.preview.setMaximumBlockCount(5000)
-        self.preview.setReadOnly(True)
+        right_panel = QtWidgets.QWidget()
+        right_layout = QtWidgets.QVBoxLayout(right_panel)
+        right_layout.setContentsMargins(0, 0, 0, 0)
+        right_layout.setSpacing(12)
 
         self.analysis_table = QtWidgets.QTableWidget(0, 2)
         self.analysis_table.setHorizontalHeaderLabels(["Метрика", "Значение"])
         self.analysis_table.horizontalHeader().setStretchLastSection(True)
         self.analysis_table.setSelectionMode(QtWidgets.QAbstractItemView.NoSelection)
         self.analysis_table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
+        right_layout.addWidget(self.analysis_table, 2)
 
         self.analysis_summary = QtWidgets.QTextBrowser()
         self.analysis_summary.setPlaceholderText("Здесь появятся инсайты по выбранному документу.")
+        right_layout.addWidget(self.analysis_summary, 2)
 
-        right_layout.addWidget(QtWidgets.QLabel("Аналитика документа"))
-        right_layout.addWidget(self.analysis_table, 1)
-        right_layout.addWidget(QtWidgets.QLabel("Предупреждения / рекомендации"))
-        right_layout.addWidget(self.analysis_summary, 1)
-        right_layout.addWidget(QtWidgets.QLabel("Фрагмент исходного текста"))
-        right_layout.addWidget(self.preview, 2)
+        self.preview = QtWidgets.QPlainTextEdit()
+        self.preview.setPlaceholderText("Предпросмотр текста…")
+        self.preview.setReadOnly(True)
+        self.preview.setMaximumBlockCount(6000)
+        right_layout.addWidget(self.preview, 3)
 
-        splitter.addWidget(left_widget)
-        splitter.addWidget(right_widget)
+        splitter.addWidget(left_panel)
+        splitter.addWidget(right_panel)
         splitter.setStretchFactor(0, 1)
         splitter.setStretchFactor(1, 2)
+        analysis_layout.addWidget(splitter)
 
-        form_box = QtWidgets.QGroupBox("Параметры корпуса")
-        form = QtWidgets.QFormLayout(form_box)
-        self.ed_code  = QtWidgets.QLineEdit("ГК РФ")
-        self.ed_title = QtWidgets.QLineEdit("Гражданский кодекс Российской Федерации")
-        self.spin_chunk   = QtWidgets.QSpinBox(); self.spin_chunk.setRange(200, 4000); self.spin_chunk.setValue(800)
-        self.spin_overlap = QtWidgets.QSpinBox(); self.spin_overlap.setRange(0, 1200); self.spin_overlap.setValue(120)
-        self.chk_gpt_summ = QtWidgets.QCheckBox("Обогащать summary (GPT-5-nano, дороже)")
-        self.chk_summ_articles_only = QtWidgets.QCheckBox("Обогащать только статьи (экономия)"); self.chk_summ_articles_only.setChecked(True)
+        layout.addWidget(analysis_card, 1)
+        layout.addStretch(1)
 
-        self.eff_from = QtWidgets.QDateEdit(); self.eff_from.setCalendarPopup(True); self.eff_from.setDisplayFormat("yyyy-MM-dd"); self.eff_from.setDate(QtCore.QDate(2000,1,1)); self.eff_from.setSpecialValueText("")
-        self.eff_to   = QtWidgets.QDateEdit(); self.eff_to.setCalendarPopup(True); self.eff_to.setDisplayFormat("yyyy-MM-dd"); self.eff_to.setDate(QtCore.QDate(2100,1,1)); self.eff_to.setSpecialValueText("")
-        self.eff_status = QtWidgets.QComboBox(); self.eff_status.addItems(["действует","утратил силу","не вступил в силу"])
-
-        form.addRow("Кодекс:", self.ed_code)
-        form.addRow("Заголовок:", self.ed_title)
-        form.addRow("Размер чанка (токенов≈):", self.spin_chunk)
-        form.addRow("Оверлап:", self.spin_overlap)
-        form.addRow(self.chk_gpt_summ)
-        form.addRow(self.chk_summ_articles_only)
-        form.addRow("Действует с:", self.eff_from)
-        form.addRow("Действует по:", self.eff_to)
-        form.addRow("Статус нормы:", self.eff_status)
-
-        lay.addLayout(header)
-        lay.addWidget(form_box)
-        lay.addWidget(splitter, 1)
+        return page
 
     def add_files(self):
-        files, _ = QtWidgets.QFileDialog.getOpenFileNames(self, "Документы", "", "Документы (*.rtf *.pdf *.docx *.txt)")
-        if not files: return
+        files, _ = QtWidgets.QFileDialog.getOpenFileNames(
+            self,
+            "Выберите документы",
+            "",
+            "Документы (*.rtf *.pdf *.docx *.txt)"
+        )
+        if not files:
+            return
         for f in files:
             self.selected_files.append(f)
             self.files_list.addItem(f)
@@ -1303,7 +1633,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.preview.clear()
 
     def on_current_file_changed(self, cur, prev):
-        if not cur: return
+        if not cur:
+            return
         path = cur.text()
         try:
             text = extract_text_from_file(path)
@@ -1317,18 +1648,20 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def parse_and_chunk(self):
         if not self.selected_files:
-            QtWidgets.QMessageBox.warning(self, "Нет файлов", "Добавьте хотя бы один файл"); return
+            QtWidgets.QMessageBox.warning(self, "Нет файлов", "Добавьте хотя бы один документ, чтобы продолжить.")
+            return
         code = self.ed_code.text().strip() or "ГК РФ"
         title = self.ed_title.text().strip() or "Гражданский кодекс Российской Федерации"
         builder = CorpusBuilder(chunk_tokens=self.spin_chunk.value(), overlap=self.spin_overlap.value())
 
         eff_from = self.eff_from.date().toString("yyyy-MM-dd")
-        eff_to   = self.eff_to.date().toString("yyyy-MM-dd")
+        eff_to = self.eff_to.date().toString("yyyy-MM-dd")
         eff_from = None if eff_from == "2000-01-01" else eff_from
-        eff_to   = None if eff_to   == "2100-01-01" else eff_to
-        status   = self.eff_status.currentText()
+        eff_to = None if eff_to == "2100-01-01" else eff_to
+        status = self.eff_status.currentText()
 
-        all_chunks: List[LawDoc] = []; all_articles: List[LawDoc] = []
+        all_chunks: List[LawDoc] = []
+        all_articles: List[LawDoc] = []
         tot_c = tot_a = 0
         for path in self.selected_files:
             try:
@@ -1336,11 +1669,19 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.analysis_per_file[path] = analyze_text_content(raw)
                 part = auto_detect_part(path)
                 chunks, arts = builder.prepare_docs(
-                    full_text=raw, code_name=code, part_name=part, title=title, source_path=path,
-                    effective_from=eff_from, effective_to=eff_to, status=status
+                    full_text=raw,
+                    code_name=code,
+                    part_name=part,
+                    title=title,
+                    source_path=path,
+                    effective_from=eff_from,
+                    effective_to=eff_to,
+                    status=status,
                 )
-                all_chunks.extend(chunks); all_articles.extend(arts)
-                tot_c += len(chunks); tot_a += len(arts)
+                all_chunks.extend(chunks)
+                all_articles.extend(arts)
+                tot_c += len(chunks)
+                tot_a += len(arts)
                 self.log(f"OK: {os.path.basename(path)} → статей: {len(arts)}; чанков: {len(chunks)}")
                 warnings = self.analysis_per_file[path].get("warnings", [])
                 if warnings:
@@ -1351,55 +1692,167 @@ class MainWindow(QtWidgets.QMainWindow):
             except Exception as e:
                 self.log(f"Ошибка парсинга {path}: {e}")
         if self.chk_gpt_summ.isChecked():
-            key = os.environ.get("OPENAI_API_KEY","") or OPENAI_API_KEY_DEFAULT
+            key = os.environ.get("OPENAI_API_KEY", "") or OPENAI_API_KEY_DEFAULT
             if key:
                 enr = Enricher(key)
+
                 def enrich(doc: LawDoc) -> None:
                     try:
                         doc.semantic_summary = enr.summarize(doc.text) or doc.semantic_summary
                         doc.semantic_summary = doc.semantic_summary[:200]
-                    except Exception as e:
-                        logger.warning(f"summary enrich fallback: {e}")
+                    except Exception as exc:
+                        logger.warning(f"summary enrich fallback: {exc}")
+
                 if self.chk_summ_articles_only.isChecked():
-                    for d in all_articles: enrich(d)
+                    for d in all_articles:
+                        enrich(d)
                 else:
-                    for d in all_articles: enrich(d)
-                    for d in all_chunks:   enrich(d)
+                    for d in all_articles:
+                        enrich(d)
+                    for d in all_chunks:
+                        enrich(d)
         self.chunks, self.articles = all_chunks, all_articles
         self.log(f"Итого: статей={tot_a}, чанков={tot_c}")
-        QtWidgets.QMessageBox.information(self, "Готово", f"Статей: {tot_a}\nЧанков: {tot_c}")
+        QtWidgets.QMessageBox.information(
+            self,
+            "Корпус готов",
+            f"Статей: {tot_a}\nЧанков: {tot_c}\nТеперь можно переходить к вкладке индексации."
+        )
 
     # ---------- Index ----------
-    def setup_index_tab(self):
-        lay = QtWidgets.QVBoxLayout(self.tab_index)
+    def build_index_page(self) -> QtWidgets.QWidget:
+        page = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(page)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(18)
 
-        form = QtWidgets.QFormLayout()
+        layout.addWidget(self.section_header(
+            "Индексация в Qdrant",
+            "Здесь настраиваем подключение к OpenAI и решаем, какие документы отправлять в векторное хранилище."
+        ))
+
+        info_card = self.create_card()
+        info_layout = info_card.layout()
+        info_text = QtWidgets.QLabel(
+            "<b>Памятка:</b> индексация идёт батчами, поэтому можно безопасно отменить процесс — уже отправленные порции сохранятся."
+        )
+        info_text.setWordWrap(True)
+        info_text.setObjectName("OptionHint")
+        info_layout.addWidget(info_text)
+        layout.addWidget(info_card)
+
+        options_card = self.create_card()
+        options_layout = options_card.layout()
+
+        params_widget = QtWidgets.QWidget()
+        params_grid = QtWidgets.QGridLayout(params_widget)
+        params_grid.setColumnStretch(1, 1)
+        params_grid.setHorizontalSpacing(18)
+        params_grid.setVerticalSpacing(10)
+
         self.ed_api_key = QtWidgets.QLineEdit(os.environ.get("OPENAI_API_KEY", OPENAI_API_KEY_DEFAULT))
         self.ed_api_key.setEchoMode(QtWidgets.QLineEdit.Password)
-        self.spin_batch = QtWidgets.QSpinBox(); self.spin_batch.setRange(1,128); self.spin_batch.setValue(32)
-        self.chk_idx_articles = QtWidgets.QCheckBox("Индексировать статьи"); self.chk_idx_articles.setChecked(True)
-        self.chk_idx_chunks   = QtWidgets.QCheckBox("Индексировать чанки"); self.chk_idx_chunks.setChecked(True)
-        self.chk_quant        = QtWidgets.QCheckBox("Включить int8-квантизацию (чуть быстрее, но ниже точность)"); self.chk_quant.setChecked(False)
-        form.addRow("OpenAI API Key:", self.ed_api_key)
-        form.addRow("Batch (эмбеддинги):", self.spin_batch)
-        form.addRow(self.chk_idx_articles)
-        form.addRow(self.chk_idx_chunks)
-        form.addRow(self.chk_quant)
+        row = 0
+        row = self.add_option_row(
+            params_grid,
+            row,
+            "OpenAI API Key",
+            self.ed_api_key,
+            "Нужен для эмбеддингов и подсказок GPT. Ключ хранится только в оперативной памяти и используется для вызовов API."
+        )
 
-        btns = QtWidgets.QHBoxLayout()
-        self.btn_check_openai = QtWidgets.QPushButton("Проверить OpenAI"); self.btn_check_openai.clicked.connect(self.check_openai)
-        self.btn_check_qdrant = QtWidgets.QPushButton("Проверить Qdrant"); self.btn_check_qdrant.clicked.connect(self.check_qdrant)
-        self.btn_export_jsonl = QtWidgets.QPushButton("Экспорт JSONL…");   self.btn_export_jsonl.clicked.connect(self.export_jsonl)
-        self.btn_export_split = QtWidgets.QPushButton("Экспорт JSONL (отд.)"); self.btn_export_split.clicked.connect(self.export_jsonl_split)
-        self.btn_index        = QtWidgets.QPushButton("Индексировать (stream)");     self.btn_index.clicked.connect(self.do_index)
-        self.btn_cancel       = QtWidgets.QPushButton("Отмена"); self.btn_cancel.clicked.connect(self.cancel_index)
+        self.spin_batch = QtWidgets.QSpinBox()
+        self.spin_batch.setRange(1, 128)
+        self.spin_batch.setValue(32)
+        row = self.add_option_row(
+            params_grid,
+            row,
+            "Размер батча",
+            self.spin_batch,
+            "Сколько текстов отправляем на эмбеддинг за один запрос. Большой батч ускоряет работу, но требует стабильного соединения."
+        )
 
-        btns.addWidget(self.btn_check_openai); btns.addWidget(self.btn_check_qdrant)
-        btns.addWidget(self.btn_export_jsonl); btns.addWidget(self.btn_export_split); btns.addWidget(self.btn_index); btns.addWidget(self.btn_cancel)
+        self.chk_idx_articles = QtWidgets.QCheckBox("Включить")
+        self.chk_idx_articles.setChecked(True)
+        row = self.add_toggle_row(
+            params_grid,
+            row,
+            "Индексировать статьи",
+            self.chk_idx_articles,
+            "Отправляет полноценные статьи в коллекцию {COLL_ARTICLES}. Полезно для быстрых ответов на уровне норм."
+        )
 
-        self.progress = QtWidgets.QProgressBar(); self.progress.setRange(0,100)
+        self.chk_idx_chunks = QtWidgets.QCheckBox("Включить")
+        self.chk_idx_chunks.setChecked(True)
+        row = self.add_toggle_row(
+            params_grid,
+            row,
+            "Индексировать чанки",
+            self.chk_idx_chunks,
+            "Добавляет более мелкие фрагменты в коллекцию {COLL_CHUNKS}. Они дают точные подсказки и улучшают поиск по деталям."
+        )
 
-        lay.addLayout(form); lay.addLayout(btns); lay.addWidget(self.progress)
+        self.chk_quant = QtWidgets.QCheckBox("Активировать")
+        self.chk_quant.setChecked(False)
+        row = self.add_toggle_row(
+            params_grid,
+            row,
+            "Int8-квантизация",
+            self.chk_quant,
+            "Сжимает вектора для экономии места. Скорость выше, но немного падает точность. Используйте, если дисков мало."
+        )
+
+        options_layout.addWidget(params_widget)
+
+        buttons_row = QtWidgets.QHBoxLayout()
+        self.btn_check_openai = QtWidgets.QPushButton("Проверить OpenAI")
+        self.btn_check_openai.clicked.connect(self.check_openai)
+        self.btn_check_openai.setToolTip("Выполняет пробный запрос к OpenAI, чтобы убедиться, что ключ верный и модель доступна.")
+        self.btn_check_qdrant = QtWidgets.QPushButton("Проверить Qdrant")
+        self.btn_check_qdrant.clicked.connect(self.check_qdrant)
+        self.btn_check_qdrant.setToolTip("Создаёт коллекции (если их нет) и показывает текущие счётчики точек.")
+        self.btn_export_jsonl = QtWidgets.QPushButton("Экспорт JSONL…")
+        self.btn_export_jsonl.clicked.connect(self.export_jsonl)
+        self.btn_export_jsonl.setToolTip("Сохраняет подготовленные документы в один JSONL, чтобы загрузить их вне приложения.")
+        self.btn_export_split = QtWidgets.QPushButton("Экспорт JSONL (отдельно)")
+        self.btn_export_split.clicked.connect(self.export_jsonl_split)
+        self.btn_export_split.setToolTip("Сохраняет статьи и чанки в разные файлы — удобно для ручного анализа.")
+        self.btn_index = QtWidgets.QPushButton("Запустить индексацию")
+        self.btn_index.clicked.connect(self.do_index)
+        self.btn_index.setToolTip("Стартует потоковую индексацию: эмбеддинг → upsert в Qdrant без лишней нагрузки на память.")
+        self.btn_cancel = QtWidgets.QPushButton("Отмена")
+        self.btn_cancel.clicked.connect(self.cancel_index)
+        self.btn_cancel.setToolTip("Останавливает текущую индексацию. Уже отправленные данные остаются в коллекции.")
+
+        for btn in [
+            self.btn_check_openai,
+            self.btn_check_qdrant,
+            self.btn_export_jsonl,
+            self.btn_export_split,
+            self.btn_index,
+            self.btn_cancel,
+        ]:
+            buttons_row.addWidget(btn)
+        buttons_row.addStretch(1)
+        options_layout.addLayout(buttons_row)
+        layout.addWidget(options_card)
+
+        progress_card = self.create_card()
+        progress_layout = progress_card.layout()
+        progress_layout.addWidget(QtWidgets.QLabel("Ход индексации"))
+        self.progress = QtWidgets.QProgressBar()
+        self.progress.setRange(0, 100)
+        progress_layout.addWidget(self.progress)
+        progress_hint = QtWidgets.QLabel(
+            "После завершения индексации можно сразу перейти на вкладку поиска и проверить качество выдачи."
+        )
+        progress_hint.setObjectName("OptionHint")
+        progress_hint.setWordWrap(True)
+        progress_layout.addWidget(progress_hint)
+        layout.addWidget(progress_card)
+
+        layout.addStretch(1)
+        return page
 
     def check_openai(self):
         key = self.ed_api_key.text().strip()
@@ -1417,7 +1870,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 pass
             self.log(msg)
             QtWidgets.QMessageBox.information(self, "OpenAI", msg)
-            if key: os.environ["OPENAI_API_KEY"] = key
+            if key:
+                os.environ["OPENAI_API_KEY"] = key
         except Exception as e:
             QtWidgets.QMessageBox.critical(self, "OpenAI", str(e))
 
@@ -1425,40 +1879,55 @@ class MainWindow(QtWidgets.QMainWindow):
         q = QdrantIndex(QDRANT_PATH)
         use_quant = self.chk_quant.isChecked()
         q.ensure_named_collection(COLL_ARTICLES, use_quantization=use_quant)
-        q.ensure_named_collection(COLL_CHUNKS,   use_quantization=use_quant)
+        q.ensure_named_collection(COLL_CHUNKS, use_quantization=use_quant)
         names = [c.name for c in q.client.get_collections().collections]
-        msg = (f"Коллекции: {names}\n"
-               f"{COLL_ARTICLES}: {q.client.count(COLL_ARTICLES).count}\n"
-               f"{COLL_CHUNKS}: {q.client.count(COLL_CHUNKS).count}\n"
-               f"Путь: {QDRANT_PATH}\nКвантизация: {'ON' if use_quant else 'OFF'}")
+        msg = (
+            f"Коллекции: {names}\n"
+            f"{COLL_ARTICLES}: {q.client.count(COLL_ARTICLES).count}\n"
+            f"{COLL_CHUNKS}: {q.client.count(COLL_CHUNKS).count}\n"
+            f"Путь: {QDRANT_PATH}\nКвантизация: {'ON' if use_quant else 'OFF'}"
+        )
         self.log(msg)
         QtWidgets.QMessageBox.information(self, "Qdrant", msg)
 
     def export_jsonl(self):
         if not (self.chunks or self.articles):
-            QtWidgets.QMessageBox.warning(self, "Нет данных", "Сначала подготовьте документы."); return
-        path, _ = QtWidgets.QFileDialog.getSaveFileName(self, "Сохранить JSONL", "gk_full.jsonl", "JSON Lines (*.jsonl)")
-        if not path: return
+            QtWidgets.QMessageBox.warning(self, "Нет данных", "Сначала подготовьте документы на вкладке 'Импорт'.")
+            return
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self,
+            "Сохранить JSONL",
+            "gk_full.jsonl",
+            "JSON Lines (*.jsonl)"
+        )
+        if not path:
+            return
         with open(path, "w", encoding="utf-8") as f:
             for d in (self.articles + self.chunks):
                 f.write(json.dumps(asdict(d), ensure_ascii=False) + "\n")
         manifest = {
-            "version": "3.7",
+            "version": "4.0",
             "embed_model": EMBED_MODEL,
             "vector_size": VECTOR_SIZE,
             "created_at": datetime.utcnow().isoformat() + "Z",
-            "counts": {"articles": len(self.articles), "chunks": len(self.chunks)}
+            "counts": {"articles": len(self.articles), "chunks": len(self.chunks)},
         }
         with open(path + ".manifest.json", "w", encoding="utf-8") as mf:
             json.dump(manifest, mf, ensure_ascii=False, indent=2)
         self.log(f"Экспортировано: {path}")
-        QtWidgets.QMessageBox.information(self, "Экспорт", f"Сохранено: {path}\nМанифест: {os.path.basename(path)}.manifest.json")
+        QtWidgets.QMessageBox.information(
+            self,
+            "Экспорт",
+            f"Сохранено: {path}\nМанифест: {os.path.basename(path)}.manifest.json"
+        )
 
     def export_jsonl_split(self):
         if not (self.chunks or self.articles):
-            QtWidgets.QMessageBox.warning(self, "Нет данных", "Сначала подготовьте документы."); return
+            QtWidgets.QMessageBox.warning(self, "Нет данных", "Сначала подготовьте документы на вкладке 'Импорт'.")
+            return
         base_dir = QtWidgets.QFileDialog.getExistingDirectory(self, "Выбрать папку для экспорта")
-        if not base_dir: return
+        if not base_dir:
+            return
         p_art = os.path.join(base_dir, "articles.jsonl")
         p_chk = os.path.join(base_dir, "chunks.jsonl")
         with open(p_art, "w", encoding="utf-8") as f:
@@ -1468,29 +1937,36 @@ class MainWindow(QtWidgets.QMainWindow):
             for d in self.chunks:
                 f.write(json.dumps(asdict(d), ensure_ascii=False) + "\n")
         manifest = {
-            "version": "3.7",
+            "version": "4.0",
             "embed_model": EMBED_MODEL,
             "vector_size": VECTOR_SIZE,
             "created_at": datetime.utcnow().isoformat() + "Z",
-            "counts": {"articles": len(self.articles), "chunks": len(self.chunks)}
+            "counts": {"articles": len(self.articles), "chunks": len(self.chunks)},
         }
         with open(os.path.join(base_dir, "manifest.json"), "w", encoding="utf-8") as f:
             json.dump(manifest, f, ensure_ascii=False, indent=2)
         self.log(f"Экспортировано: {p_art} и {p_chk}")
-        QtWidgets.QMessageBox.information(self, "Экспорт", f"Сохранено: {p_art}\n{p_chk}")
+        QtWidgets.QMessageBox.information(
+            self,
+            "Экспорт",
+            f"Сохранено: {p_art}\n{p_chk}"
+        )
 
     def do_index(self):
         if not (self.chunks or self.articles):
-            QtWidgets.QMessageBox.warning(self, "Нет данных", "Сначала подготовьте документы."); return
+            QtWidgets.QMessageBox.warning(self, "Нет данных", "Сначала подготовьте документы на вкладке 'Импорт'.")
+            return
         key = self.ed_api_key.text().strip() or OPENAI_API_KEY_DEFAULT
         if key:
             os.environ["OPENAI_API_KEY"] = key
         self.index_thread = IndexWorker(
-            api_key=key, articles=self.articles, chunks=self.chunks,
+            api_key=key,
+            articles=self.articles,
+            chunks=self.chunks,
             do_articles=self.chk_idx_articles.isChecked(),
             do_chunks=self.chk_idx_chunks.isChecked(),
             batch=int(self.spin_batch.value()),
-            use_quant=self.chk_quant.isChecked()
+            use_quant=self.chk_quant.isChecked(),
         )
         self.index_thread.progressChanged.connect(self.on_index_progress)
         self.index_thread.finishedOk.connect(self.on_index_ok)
@@ -1514,68 +1990,178 @@ class MainWindow(QtWidgets.QMainWindow):
     def on_index_failed(self, err: str):
         hint = ""
         if "'$.input' is invalid" in err or "invalid_request_error" in err:
-            hint = ("\n\nВозможная причина: один из текстов был слишком длинным для модели эмбеддингов. "
-                    "Входы автоматически подрезаются (≤8000 ток.). Повторите запуск. "
-                    "Если ошибка сохраняется — проверьте соединение и ключ.")
+            hint = (
+                "\n\nВозможная причина: один из текстов был слишком длинным для модели эмбеддингов. "
+                "Входы автоматически подрезаются (≤8000 ток.). Повторите запуск. "
+                "Если ошибка сохраняется — проверьте соединение и ключ."
+            )
         if "Несовпадение размерности эмбеддинга" in err:
-            hint = ("\n\nОткройте «Индексация → Проверить OpenAI», посмотрите фактический dim и "
-                    "обновите VECTOR_SIZE в коде, затем пересоздайте коллекции Qdrant.")
+            hint = (
+                "\n\nОткройте вкладку индексации и выполните 'Проверить OpenAI', посмотрите фактический dim и обновите VECTOR_SIZE."
+            )
         if "Cancelled" in err:
             hint = "\n\nИндексация отменена пользователем (данные консистентны, upsert батчевый)."
         self.log(f"[Индексация: ошибка] {err}{hint}")
         QtWidgets.QMessageBox.critical(self, "Индексация", f"Ошибка: {err}{hint}")
 
     # ---------- Search ----------
-    def setup_search_tab(self):
-        lay = QtWidgets.QVBoxLayout(self.tab_search)
-        top = QtWidgets.QHBoxLayout()
+    def build_search_page(self) -> QtWidgets.QWidget:
+        page = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(page)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(18)
+
+        layout.addWidget(self.section_header(
+            "Поиск по векторной базе",
+            "Формулируйте запрос, выбирайте настройки ассоциаций и смотрите, какие нормы отвечает система."
+        ))
+
+        query_card = self.create_card()
+        query_layout = query_card.layout()
+
+        query_row = QtWidgets.QHBoxLayout()
         self.ed_query = QtWidgets.QLineEdit()
         self.ed_query.setPlaceholderText("Например: ст. 395 проценты за пользование чужими денежными средствами")
-        self.btn_search = QtWidgets.QPushButton("Искать"); self.btn_search.clicked.connect(self.do_search)
-        top.addWidget(self.ed_query); top.addWidget(self.btn_search)
+        self.ed_query.setToolTip("Введите вопрос или ссылку на статью. Приложение само подстроит вес заголовков и найдёт релевантные фрагменты.")
+        self.btn_search = QtWidgets.QPushButton("Старт поиска")
+        self.btn_search.clicked.connect(self.do_search)
+        self.btn_search.setToolTip("Запускает поиск по Qdrant, учитывая выбранные настройки и возможные фильтры по дате.")
+        query_row.addWidget(self.ed_query, 1)
+        query_row.addWidget(self.btn_search)
+        query_layout.addLayout(query_row)
 
-        form = QtWidgets.QFormLayout()
-        self.ed_asof = QtWidgets.QDateEdit(); self.ed_asof.setCalendarPopup(True); self.ed_asof.setDisplayFormat("yyyy-MM-dd")
-        self.ed_asof.setSpecialValueText(""); self.ed_asof.setDate(QtCore.QDate.currentDate())
+        params_widget = QtWidgets.QWidget()
+        params_grid = QtWidgets.QGridLayout(params_widget)
+        params_grid.setColumnStretch(1, 1)
+        params_grid.setHorizontalSpacing(18)
+        params_grid.setVerticalSpacing(10)
 
-        self.spin_k  = QtWidgets.QSpinBox(); self.spin_k.setRange(1,10); self.spin_k.setValue(5)
-        self.spin_fuse_title = QtWidgets.QDoubleSpinBox(); self.spin_fuse_title.setRange(0,1); self.spin_fuse_title.setSingleStep(0.05); self.spin_fuse_title.setValue(0.35)
+        self.ed_asof = QtWidgets.QDateEdit()
+        self.ed_asof.setCalendarPopup(True)
+        self.ed_asof.setDisplayFormat("yyyy-MM-dd")
+        self.ed_asof.setSpecialValueText("")
+        self.ed_asof.setDate(QtCore.QDate.currentDate())
+        row = 0
+        row = self.add_option_row(
+            params_grid,
+            row,
+            "Дата as-of",
+            self.ed_asof,
+            "Если нужно видеть нормы на конкретную дату, установите её здесь. Пустое значение означает 'сейчас'."
+        )
 
-        self.chk_hyde = QtWidgets.QCheckBox("HyDE для body"); self.chk_hyde.setChecked(True)
-        self.chk_rerank = QtWidgets.QCheckBox("GPT-rerank (дороже)"); self.chk_rerank.setChecked(False)
-        self.chk_client_pref = QtWidgets.QCheckBox("Клиентский as-of префильтр (ускоряет)"); self.chk_client_pref.setChecked(True)
+        self.spin_k = QtWidgets.QSpinBox()
+        self.spin_k.setRange(1, 10)
+        self.spin_k.setValue(5)
+        row = self.add_option_row(
+            params_grid,
+            row,
+            "Количество ответов",
+            self.spin_k,
+            "Сколько лучших фрагментов показать в выдаче. Большее число — шире контекст."
+        )
 
-        form.addRow("as_of_date:", self.ed_asof)
-        form.addRow("Топ фрагментов:", self.spin_k)
-        form.addRow("Вес title (для смеси):", self.spin_fuse_title)
-        form.addRow(self.chk_hyde)
-        form.addRow(self.chk_rerank)
-        form.addRow(self.chk_client_pref)
+        self.spin_fuse_title = QtWidgets.QDoubleSpinBox()
+        self.spin_fuse_title.setRange(0.0, 1.0)
+        self.spin_fuse_title.setSingleStep(0.05)
+        self.spin_fuse_title.setValue(0.35)
+        row = self.add_option_row(
+            params_grid,
+            row,
+            "Вес заголовка",
+            self.spin_fuse_title,
+            "Определяет вклад заголовка статьи при смешивании результатов. Для запросов вида 'ст. N' лучше повышать значение."
+        )
 
+        self.chk_hyde = QtWidgets.QCheckBox("Использовать HyDE")
+        self.chk_hyde.setChecked(True)
+        row = self.add_toggle_row(
+            params_grid,
+            row,
+            "HyDE-подсказка",
+            self.chk_hyde,
+            "HyDE генерирует гипотетический ответ и эмбеддит его. Это помогает поймать смыслы, даже если формулировка запроса редкая."
+        )
+
+        self.chk_rerank = QtWidgets.QCheckBox("Включить rerank")
+        self.chk_rerank.setChecked(False)
+        row = self.add_toggle_row(
+            params_grid,
+            row,
+            "GPT-rerank",
+            self.chk_rerank,
+            "Пересортировывает топ найденных фрагментов через GPT-мини-модель. Точность выше, но тратятся токены."
+        )
+
+        self.chk_client_pref = QtWidgets.QCheckBox("Включить префильтр")
+        self.chk_client_pref.setChecked(True)
+        row = self.add_toggle_row(
+            params_grid,
+            row,
+            "Клиентский префильтр",
+            self.chk_client_pref,
+            "Быстро отсеивает нерелевантные документы на стороне клиента. Отключайте, если хотите увидеть абсолютно все кандидаты."
+        )
+
+        query_layout.addWidget(params_widget)
+        layout.addWidget(query_card)
+
+        results_card = self.create_card()
+        results_layout = results_card.layout()
+        results_layout.addWidget(QtWidgets.QLabel("Результаты"))
         self.results = QtWidgets.QTextBrowser()
-        self.btn_copy_ctx = QtWidgets.QPushButton("Копировать контекст для GPT"); self.btn_copy_ctx.clicked.connect(self.copy_context)
-        self.btn_save_ctx = QtWidgets.QPushButton("Сохранить контекст в файл…"); self.btn_save_ctx.clicked.connect(self.save_context)
-        self.btn_clear_cache = QtWidgets.QPushButton("Очистить кэш"); self.btn_clear_cache.clicked.connect(self.clear_search_cache)
+        self.results.setPlaceholderText("Здесь появятся фрагменты из Qdrant вместе с подсказками и контекстом.")
+        results_layout.addWidget(self.results)
+        layout.addWidget(results_card, 1)
 
-        lay.addLayout(top); lay.addLayout(form); lay.addWidget(self.results)
-        rowb = QtWidgets.QHBoxLayout(); rowb.addWidget(self.btn_copy_ctx); rowb.addWidget(self.btn_save_ctx); rowb.addWidget(self.btn_clear_cache)
-        lay.addLayout(rowb)
+        context_card = self.create_card()
+        context_layout = context_card.layout()
+        btns = QtWidgets.QHBoxLayout()
+        self.btn_copy_ctx = QtWidgets.QPushButton("Скопировать контекст")
+        self.btn_copy_ctx.clicked.connect(self.copy_context)
+        self.btn_copy_ctx.setToolTip("Копирует подобранные фрагменты в буфер обмена — удобно передавать их в GPT.")
+        self.btn_save_ctx = QtWidgets.QPushButton("Сохранить в файл")
+        self.btn_save_ctx.clicked.connect(self.save_context)
+        self.btn_save_ctx.setToolTip("Сохраняет блоки контекста в обычный текстовый файл.")
+        self.btn_clear_cache = QtWidgets.QPushButton("Очистить кэш")
+        self.btn_clear_cache.clicked.connect(self.clear_search_cache)
+        self.btn_clear_cache.setToolTip("Удаляет прогретые данные Qdrant, чтобы заново прогрузить актуальное состояние коллекций.")
+        btns.addWidget(self.btn_copy_ctx)
+        btns.addWidget(self.btn_save_ctx)
+        btns.addWidget(self.btn_clear_cache)
+        btns.addStretch(1)
+        context_layout.addLayout(btns)
+        context_hint = QtWidgets.QLabel(
+            "Контекст можно сразу отправить в GPT-mini (если включён rerank) или использовать для валидации ответов вручную."
+        )
+        context_hint.setObjectName("OptionHint")
+        context_hint.setWordWrap(True)
+        context_layout.addWidget(context_hint)
+        layout.addWidget(context_card)
 
-        self._last_rag_blocks: List[str] = []
+        layout.addStretch(1)
+        return page
 
     def copy_context(self):
         if not self._last_rag_blocks:
-            QtWidgets.QMessageBox.information(self, "Копировать", "Нет контекста."); return
+            QtWidgets.QMessageBox.information(self, "Копирование", "Сначала выполните поиск, чтобы появился контекст.")
+            return
         text = "\n\n---\n\n".join(self._last_rag_blocks)
-        cb = QtWidgets.QApplication.clipboard()
-        cb.setText(text)
+        QtWidgets.QApplication.clipboard().setText(text)
         self.log("Контекст скопирован в буфер обмена.")
 
     def save_context(self):
         if not self._last_rag_blocks:
-            QtWidgets.QMessageBox.information(self, "Сохранить", "Нет контекста."); return
-        path, _ = QtWidgets.QFileDialog.getSaveFileName(self, "Сохранить контекст", "context.txt", "Text (*.txt)")
-        if not path: return
+            QtWidgets.QMessageBox.information(self, "Сохранить", "Нет контекста для сохранения — выполните поиск.")
+            return
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self,
+            "Сохранить контекст",
+            "context.txt",
+            "Text (*.txt)"
+        )
+        if not path:
+            return
         sep = "\n\n---\n\n"
         with open(path, "w", encoding="utf-8") as f:
             f.write(sep.join(self._last_rag_blocks))
@@ -1586,303 +2172,82 @@ class MainWindow(QtWidgets.QMainWindow):
         self.cache_progress_lbl.setText("Кэш очищен")
         self.log("Поисковый кэш очищен.")
 
-    def _warm_cache_if_needed(self, step_each=8000):
-        if self.search_cache is None:
-            qdr = QdrantIndex(QDRANT_PATH)
-            self.search_cache = SearchCache(qdr)
-            self.search_cache.cache[COLL_ARTICLES] = []
-            self.search_cache.cache[COLL_CHUNKS] = []
-            self.search_cache.next_offsets[COLL_ARTICLES] = None
-            self.search_cache.next_offsets[COLL_CHUNKS] = None
-            self.log("Кеш поисковой выдачи инициализирован.")
-        total_a, done_a = self.search_cache.warm_step(COLL_ARTICLES, limit_step=step_each)
-        total_c, done_c = self.search_cache.warm_step(COLL_CHUNKS,   limit_step=step_each)
-        status = f"Кэш: articles={total_a}{'✓' if done_a else ''}, chunks={total_c}{'✓' if done_c else ''}"
-        self.cache_progress_lbl.setText(status)
-        self.log(status)
-
-    def do_search(self):
-        qtxt = self.ed_query.text().strip()
-        if not qtxt: return
-        k = int(self.spin_k.value())
-        use_hyde = self.chk_hyde.isChecked()
-        use_rerank = self.chk_rerank.isChecked()
-        use_client_pref = self.chk_client_pref.isChecked()
-
-        m_art = re.search(r"ст\.?\s*(\d+(?:\.\d+)*)", qtxt.lower())
-        if m_art and self.spin_fuse_title.value() < 0.55:
-            self.spin_fuse_title.setValue(0.55)
-
-        w_title = float(self.spin_fuse_title.value())
-        w_body = 1.0 - w_title
-
-        as_of = self.ed_asof.date().toString("yyyy-MM-dd")
-        today = QtCore.QDate.currentDate().toString("yyyy-MM-dd")
-        if not as_of or as_of == today:
-            as_of_iso = None
-        else:
-            try:
-                _ = dtparser.parse(as_of)
-                as_of_iso = f"{as_of}T23:59:59Z"
-            except Exception:
-                QtWidgets.QMessageBox.warning(self, "as_of", f"Дата as_of не распознана: {as_of}. Поиск без фильтра.")
-                self.log(f"as_of parse failed: {as_of}")
-                as_of_iso = None
-
-        key = os.environ.get("OPENAI_API_KEY","") or OPENAI_API_KEY_DEFAULT
-        try:
-            emb = Embedder(key)
-        except Exception as e:
-            QtWidgets.QMessageBox.critical(self, "OpenAI", f"Embedder: {e}"); return
-
-        gpt_for_hyde = GPTMini(key) if key else None
-        qemb = QueryEmbedder(emb, gpt_for_hyde, use_hyde=use_hyde)
-
-        self._warm_cache_if_needed(step_each=8000)
-
-        qdr = self.search_cache.qdr
-
-        def prefilter(collection: str) -> Tuple[List[str], List]:
-            payload_pts = list(self.search_cache.cache.get(collection, []))
-            if as_of_iso and use_client_pref:
-                try:
-                    cut = dtparser.parse(as_of_iso).date()
-                    def to_date(x):
-                        try: return dtparser.parse(x).date()
-                        except: return None
-                    def alive(pl: Dict) -> bool:
-                        ef = to_date(pl.get("effective_from"))
-                        et = to_date(pl.get("effective_to"))
-                        st = (pl.get("status") or "").lower()
-                        if ef and cut < ef: return False
-                        if et and cut > et: return False
-                        if "утрат" in st and (not et or cut >= et): return False
-                        return True
-                    payload_pts = [p for p in payload_pts if alive(p.payload or {})]
-                except Exception as e:
-                    logger.warning(f"as_of parse in prefilter: {e}")
-            ids = keyword_prefilter(payload_pts, qtxt, topk=300) if use_client_pref else []
-            return ids, payload_pts
-
-        ids_a, pts_a = prefilter(COLL_ARTICLES)
-        ids_c, pts_c = prefilter(COLL_CHUNKS)
-
-        q_title = list(qemb.embed_title_cached(qtxt))
-        q_body  = list(qemb.embed_body_hyde_cached(qtxt))
-
-        def search_ids_rrf(collection, vector_name_title, vector_name_body, qvec_title, qvec_body, ids_prefilter, limit_each, as_of_iso):
-            """
-            Старые версии qdrant-client не имеют NamedQuery; используем два отдельных search вызова
-            по named-векторам (using=...).
-            Возвращаем RRF-оценки для title/body.
-            """
-            ranks_title: Dict[str,int] = {}
-            ranks_body:  Dict[str,int] = {}
-
-            filters = make_asof_filters_strict(as_of_iso)
-
-            def run_one(using_name: str, qv: List[float]) -> List[str]:
-                out_ids: List[str] = []
-                for flt in filters:
-                    # Клиентский префильтр по id (если есть)
-                    base_filter = qm.Filter(must=[qm.HasIdCondition(has_id=ids_prefilter)]) if ids_prefilter else None
-                    if flt and base_filter:
-                        qf = qm.Filter(must=(base_filter.must + flt.must), should=(flt.should or []))
-                    else:
-                        qf = base_filter or flt
-
-                    res = qdr.client.query_points(
-                        collection_name=collection,
-                        query=qm.NamedQuery(
-                            name=using_name,
-                            vector=qv,
-                            limit=limit_each,
-                            filter=qf
-                        ),
-                        with_payload=False,
-                        with_vectors=False
-                    )
-                    if res:
-                        out_ids.extend([str(p.id) for p in res])
-
-                # убираем дубли, сохраняем порядок; ограничиваем limit_each
-                return list(dict.fromkeys(out_ids))[:limit_each]
-
-            ids_t = run_one(vector_name_title, qvec_title)
-            ids_b = run_one(vector_name_body,  qvec_body)
-
-            ranks_title.update({pid:i+1 for i,pid in enumerate(ids_t)})
-            ranks_body.update({pid:i+1 for i,pid in enumerate(ids_b)})
-
-            return rrf_scores(ranks_title), rrf_scores(ranks_body)
-
-        limit_each = max(20, k*3)
-
-        title_rrf_a, body_rrf_a = search_ids_rrf(
-            COLL_ARTICLES, "title_vec", "body_vec", q_title, q_body, ids_a, limit_each, as_of_iso
-        )
-        fused_a = combine_rrf_weighted(title_rrf_a, body_rrf_a, w_title, w_body)
-
-        title_rrf_c, body_rrf_c = search_ids_rrf(
-            COLL_CHUNKS, "title_vec", "body_vec", q_title, q_body, ids_c, limit_each, as_of_iso
-        )
-        fused_c = combine_rrf_weighted(title_rrf_c, body_rrf_c, w_title, w_body)
-
-        fused_all: Dict[str,float] = {}
-        for dct in (fused_a, fused_c):
-            for pid, sc in dct.items():
-                fused_all[pid] = fused_all.get(pid, 0.0) + sc
-
-        ranked_ids = [pid for pid,_ in sorted(fused_all.items(), key=lambda x: x[1], reverse=True)]
-        id2payload = {}
-        for pid in ranked_ids:
-            p = self.search_cache.id2point.get(pid)
-            if p: id2payload[pid] = p.payload or {}
-        m = re.search(r"ст\.?\s*(\d+(?:\.\d+)*)", qtxt.lower())
-        target_art = m.group(1) if m else None
-        boost_exact_article(fused_all, id2payload, target_art)
-        ranked_ids = [pid for pid,_ in sorted(fused_all.items(), key=lambda x: x[1], reverse=True)]
-
-        def pick_points_from_cache(ids_sorted: List[str]) -> List:
-            out = []
-            for pid in ids_sorted:
-                p = self.search_cache.id2point.get(pid)
-                if p is not None:
-                    out.append(p)
-            return out
-
-        prelim_points = pick_points_from_cache(ranked_ids)[:max(20, k*4)]
-
-        # GPT-rerank: используем именно фактические UUID point.id
-        gpt_for_rerank = GPTMini(key) if (key and use_rerank) else None
-        if gpt_for_rerank:
-            cands = []
-            id2p = {}
-            for p in prelim_points:
-                pl = p.payload or {}
-                qid = str(getattr(p, "id", "") or "")
-                if not qid:
-                    continue
-                cands.append({
-                    "id": qid,
-                    "title": pl.get("title"),
-                    "meta": f"Часть: {pl.get('part')}; Глава: {pl.get('chapter')}; Статья: {pl.get('article')}",
-                    "text": pl.get("text") or ""
-                })
-                id2p[qid] = p
-            reranked = gpt_for_rerank.rerank(qtxt, cands, topk=max(k,3))
-            top_ids = [cid for cid,_ in reranked]
-            points = [id2p[pid] for pid in top_ids if pid in id2p]
-        else:
-            points = prelim_points[:k]
-
-        follow_articles = []
-        for p in points:
-            refs = (p.payload or {}).get("references") or []
-            for a in refs[:3]:
-                follow_articles.append(a)
-        follow_articles = list(dict.fromkeys(follow_articles))[:5]
-
-        extra_points = []
-        for a in follow_articles:
-            try:
-                extra_points += fetch_by_article(qdr, COLL_ARTICLES, a, limit=1)
-            except Exception as e:
-                logger.warning(f"xref fetch: {e}")
-
-        all_points = points + extra_points
-        final_points = dedup_limit(all_points, k)
-
-        out = [
-            "<style>"
-            "body {background:#1f232a;color:#f0f0f0;}"
-            ".result-card {background:linear-gradient(135deg,#1f252f,#232b36);border:1px solid #2f3742;border-radius:12px;padding:16px;margin:12px 0;box-shadow:0 8px 24px rgba(0,0,0,0.25);}"
-            ".result-card h4 {margin:0 0 8px 0;font-size:18px;color:#4ea0ff;}"
-            ".result-meta {display:flex;gap:12px;font-size:13px;color:#9aa8b5;margin-bottom:8px;}"
-            ".result-summary {font-style:italic;color:#d7dde4;margin-bottom:8px;}"
-            ".badge {background:#0a84ff33;color:#9bc9ff;border:1px solid #0a84ff55;padding:2px 8px;border-radius:999px;font-size:12px;}"
-            "pre {background:#15181f;border-radius:8px;padding:12px;white-space:pre-wrap;font-family:'Fira Code',monospace;font-size:13px;color:#dce2ec;}"
-            "</style><h3>Результаты</h3>"
-        ]
-        self._last_rag_blocks = []
-        if not final_points:
-            out.append("<i>Пусто.</i>")
-        else:
-            for p in final_points:
-                pl = p.payload or {}
-                title  = pl.get("title") or ""
-                part   = pl.get("part") or "—"
-                ch     = pl.get("chapter") or "—"
-                art    = pl.get("article") or "—"
-                anchor = pl.get("anchor") or ""
-                src    = pl.get("source") or ""
-                summ   = pl.get("semantic_summary") or ""
-                snippet = safe_html((pl.get("text") or "")[:900])
-                out.append(
-                    "<div class='result-card'>"
-                    f"<h4>{safe_html(title)}</h4>"
-                    f"<div class='result-meta'><span class='badge'>Часть: {safe_html(str(part))}</span>"
-                    f"<span class='badge'>Глава: {safe_html(str(ch))}</span>"
-                    f"<span class='badge'>Статья: {safe_html(str(art))}</span></div>"
-                    f"<div class='result-summary'>{safe_html(summ)}</div>"
-                    f"<div style='font-size:12px;color:#8e9aad;margin-bottom:8px;'>{safe_html(anchor)} · {safe_html(src)}</div>"
-                    f"<pre>{snippet}…</pre>"
-                    "</div>"
-                )
-                self._last_rag_blocks.append(pl.get("formatted_text") or pl.get("text",""))
-
-            out.append("<h4>Контекст для GPT</h4>")
-            sep = "\n\n---\n\n"
-            joined_ctx = sep.join(self._last_rag_blocks)
-            out.append("<pre style='white-space:pre-wrap;font-family:inherit'>" + safe_html(joined_ctx) + "</pre>")
-
-        if self._last_rag_blocks and (gpt_for_rerank is not None):
-            ans = gpt_for_rerank.answer_with_context(qtxt, self._last_rag_blocks)
-            out.append("<h4>Черновой ответ GPT-mini</h4>")
-            out.append(f"<div style='white-space:pre-wrap;border:1px solid #ccc;border-radius:8px;padding:8px'>{safe_html(ans)}</div>")
-
-        self.results.setHtml("\n".join(out))
-
     # ---------- Tests ----------
-    def setup_tests_tab(self):
-        lay = QtWidgets.QVBoxLayout(self.tab_tests)
+    def build_tests_page(self) -> QtWidgets.QWidget:
+        page = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(page)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(18)
+
+        layout.addWidget(self.section_header(
+            "Тестовые сценарии",
+            "Набор демонстрационных запросов помогает быстро проверить качество индексации и поиск по базовым ситуациям."
+        ))
+
+        card = self.create_card()
+        card_layout = card.layout()
+        card_layout.addWidget(QtWidgets.QLabel("Выберите тест"))
+
         self.tests = QtWidgets.QListWidget()
         for q in [
             "ст. 395 проценты за пользование чужими денежными средствами",
             "исключительное право на коммерческое обозначение",
             "секрет производства (ноу-хау) ответственность",
             "принудительная лицензия условия",
-            "ответственность за незаконное использование товарного знака"
+            "ответственность за незаконное использование товарного знака",
         ]:
             self.tests.addItem(q)
-        row = QtWidgets.QHBoxLayout()
-        self.btn_run_one = QtWidgets.QPushButton("Запустить выбранный тест"); self.btn_run_one.clicked.connect(self.run_one_test)
-        self.btn_run_all = QtWidgets.QPushButton("Запустить все тесты");     self.btn_run_all.clicked.connect(self.run_all_tests)
-        row.addWidget(self.btn_run_one); row.addWidget(self.btn_run_all)
+        self.tests.setToolTip("Дважды щёлкните по пункту или используйте кнопки ниже, чтобы запустить поиск с преднастроенным запросом.")
+        self.tests.itemDoubleClicked.connect(lambda _: self.run_one_test())
+        card_layout.addWidget(self.tests)
+
+        btns = QtWidgets.QHBoxLayout()
+        self.btn_run_one = QtWidgets.QPushButton("Выполнить выбранный")
+        self.btn_run_one.clicked.connect(self.run_one_test)
+        self.btn_run_all = QtWidgets.QPushButton("Выполнить все")
+        self.btn_run_all.clicked.connect(self.run_all_tests)
+        btns.addWidget(self.btn_run_one)
+        btns.addWidget(self.btn_run_all)
+        btns.addStretch(1)
+        card_layout.addLayout(btns)
 
         self.test_out = QtWidgets.QTextBrowser()
+        self.test_out.setPlaceholderText("Здесь появится журнал запуска тестовых запросов.")
+        card_layout.addWidget(self.test_out)
 
-        lay.addWidget(QtWidgets.QLabel("Набор тестов (демо):"))
-        lay.addWidget(self.tests)
-        lay.addLayout(row)
-        lay.addWidget(self.test_out)
+        layout.addWidget(card, 1)
+        layout.addStretch(1)
+        return page
+
+    def run_one_test(self):
+        item = self.tests.currentItem()
+        if not item:
+            return
+        self.run_test_query(item.text())
+
+    def run_all_tests(self):
+        for i in range(self.tests.count()):
+            self.run_test_query(self.tests.item(i).text())
+
+    def run_test_query(self, qtxt: str):
+        self.ed_query.setText(qtxt)
+        self.do_search()
+        self.test_out.append(f"✓ Тест выполнен: {qtxt}")
 
     # ---------- Vector Lab ----------
-    def setup_vector_lab_tab(self):
-        lay = QtWidgets.QVBoxLayout(self.tab_vectors)
+    def build_vector_lab_page(self) -> QtWidgets.QWidget:
+        page = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(page)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(18)
 
-        intro = QtWidgets.QLabel(
-            "Vector Lab помогает быстро проверять эмбеддинги, исследовать коллекции Qdrant и сверять сходство документов."
-        )
-        intro.setWordWrap(True)
+        layout.addWidget(self.section_header(
+            "Vector Lab",
+            "Экспериментальная лаборатория: создавайте эмбеддинги, смотрите ключевые метрики и сразу проверяйте их в Qdrant."
+        ))
 
-        lay.addWidget(intro)
-
-        splitter = QtWidgets.QSplitter(QtCore.Qt.Vertical)
-
-        # --- верхняя часть: подготовка эмбеддинга ---
-        top_widget = QtWidgets.QWidget()
-        top_layout = QtWidgets.QVBoxLayout(top_widget)
+        top_card = self.create_card()
+        top_layout = top_card.layout()
         top_layout.addWidget(QtWidgets.QLabel("Текст для анализа"))
         self.vlab_input = QtWidgets.QPlainTextEdit()
         self.vlab_input.setPlaceholderText("Вставьте фрагмент нормы или пользовательский запрос…")
@@ -1891,8 +2256,10 @@ class MainWindow(QtWidgets.QMainWindow):
         controls = QtWidgets.QHBoxLayout()
         self.btn_vlab_embed = QtWidgets.QPushButton("Получить эмбеддинг")
         self.btn_vlab_embed.clicked.connect(self.run_vector_probe)
-        self.btn_vlab_copy = QtWidgets.QPushButton("Копировать в буфер")
+        self.btn_vlab_embed.setToolTip("Вычисляет эмбеддинг для текста и показывает, сколько токенов и ссылок внутри.")
+        self.btn_vlab_copy = QtWidgets.QPushButton("Копировать вектор")
         self.btn_vlab_copy.clicked.connect(self.copy_vector_to_clipboard)
+        self.btn_vlab_copy.setToolTip("Сохраняет последний эмбеддинг в буфер обмена в формате JSON.")
         controls.addWidget(self.btn_vlab_embed)
         controls.addWidget(self.btn_vlab_copy)
         controls.addStretch(1)
@@ -1901,20 +2268,28 @@ class MainWindow(QtWidgets.QMainWindow):
         self.vlab_info = QtWidgets.QTextBrowser()
         self.vlab_info.setPlaceholderText("Результаты по эмбеддингу и диагностике появятся здесь.")
         top_layout.addWidget(self.vlab_info)
+        layout.addWidget(top_card, 1)
 
-        splitter.addWidget(top_widget)
+        bottom_card = self.create_card()
+        bottom_layout = bottom_card.layout()
+        bottom_layout.addWidget(QtWidgets.QLabel("Проверка в Qdrant"))
 
-        # --- нижняя часть: поиск по коллекции ---
-        bottom_widget = QtWidgets.QWidget()
-        bottom_layout = QtWidgets.QVBoxLayout(bottom_widget)
         controls2 = QtWidgets.QHBoxLayout()
         self.vlab_collection = QtWidgets.QComboBox()
-        self.vlab_vector_type = QtWidgets.QComboBox(); self.vlab_vector_type.addItems(["title_vec", "body_vec"])
-        self.vlab_limit = QtWidgets.QSpinBox(); self.vlab_limit.setRange(1, 50); self.vlab_limit.setValue(10)
-        self.btn_vlab_refresh = QtWidgets.QPushButton("Обновить списки коллекций")
+        self.vlab_collection.setToolTip("Выберите коллекцию Qdrant для поиска. Список обновляется по кнопке слева.")
+        self.vlab_vector_type = QtWidgets.QComboBox()
+        self.vlab_vector_type.addItems(["title_vec", "body_vec"])
+        self.vlab_vector_type.setToolTip("Какой вектор использовать при поиске: заголовок или тело документа.")
+        self.vlab_limit = QtWidgets.QSpinBox()
+        self.vlab_limit.setRange(1, 50)
+        self.vlab_limit.setValue(10)
+        self.vlab_limit.setToolTip("Сколько ближайших результатов запросить у Qdrant.")
+        self.btn_vlab_refresh = QtWidgets.QPushButton("Обновить коллекции")
         self.btn_vlab_refresh.clicked.connect(self.refresh_vector_lab_collections)
-        self.btn_vlab_search = QtWidgets.QPushButton("Запуск поиска")
+        self.btn_vlab_refresh.setToolTip("Подтягивает актуальный список коллекций из локального Qdrant.")
+        self.btn_vlab_search = QtWidgets.QPushButton("Искать в Qdrant")
         self.btn_vlab_search.clicked.connect(self.run_vector_probe)
+        self.btn_vlab_search.setToolTip("Использует последний эмбеддинг и находит похожие элементы в выбранной коллекции.")
         controls2.addWidget(QtWidgets.QLabel("Коллекция:"))
         controls2.addWidget(self.vlab_collection, 1)
         controls2.addWidget(QtWidgets.QLabel("Вектор:"))
@@ -1930,28 +2305,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.vlab_results.horizontalHeader().setStretchLastSection(True)
         self.vlab_results.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
         self.vlab_results.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
-        bottom_layout.addWidget(self.vlab_results)
+        bottom_layout.addWidget(self.vlab_results, 1)
 
-        splitter.addWidget(bottom_widget)
-        splitter.setStretchFactor(0, 1)
-        splitter.setStretchFactor(1, 1)
-
-        lay.addWidget(splitter)
+        layout.addWidget(bottom_card, 1)
+        layout.addStretch(1)
         self.refresh_vector_lab_collections()
-
-    def run_one_test(self):
-        item = self.tests.currentItem()
-        if not item: return
-        self.run_test_query(item.text())
-
-    def run_all_tests(self):
-        for i in range(self.tests.count()):
-            self.run_test_query(self.tests.item(i).text())
-
-    def run_test_query(self, qtxt: str):
-        self.ed_query.setText(qtxt)
-        self.do_search()
-        self.test_out.append(f"✓ Тест выполнен: {qtxt}")
+        return page
 
     def refresh_vector_lab_collections(self):
         try:
@@ -2005,7 +2364,7 @@ class MainWindow(QtWidgets.QMainWindow):
                         f"Размер эмбеддинга: {len(vector)}",
                         f"Оценка токенов: {info.get('rough_tokens')}",
                         f"Ключевые слова: {', '.join(info.get('keywords', [])) or '—'}",
-                        f"Найденные ссылки: {', '.join(info.get('references', [])) or '—'}"
+                        f"Найденные ссылки: {', '.join(info.get('references', [])) or '—'}",
                     ])
                 )
                 if info.get("warnings"):
@@ -2022,40 +2381,311 @@ class MainWindow(QtWidgets.QMainWindow):
 
         if info_chunks:
             self.vlab_info.setText("\n\n".join(info_chunks))
-        else:
-            self.vlab_info.clear()
 
-        collection = self.vlab_collection.currentText()
-        if not collection or not self.vlab_collection.isEnabled():
+        collection_name = self.vlab_collection.currentText()
+        if not collection_name or not self.vlab_collection.isEnabled():
             return
-
         try:
             qdr = QdrantIndex(QDRANT_PATH)
-            named = self.vlab_vector_type.currentText()
-            limit = int(self.vlab_limit.value())
             res = qdr.client.query_points(
-                collection_name=collection,
-                query=qm.NamedQuery(name=named, vector=vector, limit=limit),
+                collection_name=collection_name,
+                query=qm.NamedQuery(
+                    name=self.vlab_vector_type.currentText(),
+                    vector=vector,
+                    limit=self.vlab_limit.value(),
+                ),
                 with_payload=True,
-                with_vectors=False
+                with_vectors=False,
             )
         except Exception as e:
-            self.vlab_results.setRowCount(0)
-            self.vlab_info.append(f"\nПоиск не выполнен: {e}")
+            QtWidgets.QMessageBox.critical(self, "Vector Lab", f"Ошибка поиска в Qdrant: {e}")
             return
 
         self.vlab_results.setRowCount(len(res))
         for row, point in enumerate(res):
+            self.vlab_results.setItem(row, 0, QtWidgets.QTableWidgetItem(f"{point.score:.4f}"))
+            self.vlab_results.setItem(row, 1, QtWidgets.QTableWidgetItem(str(point.id)))
             payload = point.payload or {}
-            score = getattr(point, "score", None)
-            if score is None:
-                score = payload.get("score", 0.0)
-            self.vlab_results.setItem(row, 0, QtWidgets.QTableWidgetItem(f"{score:.4f}"))
-            self.vlab_results.setItem(row, 1, QtWidgets.QTableWidgetItem(str(getattr(point, "id", ""))))
             self.vlab_results.setItem(row, 2, QtWidgets.QTableWidgetItem(str(payload.get("article", "—"))))
             self.vlab_results.setItem(row, 3, QtWidgets.QTableWidgetItem(str(payload.get("chapter", "—"))))
-            snippet = (payload.get("semantic_summary") or payload.get("text") or "")[:160]
+            snippet = (payload.get("text") or "")[:140].replace("\n", " ")
             self.vlab_results.setItem(row, 4, QtWidgets.QTableWidgetItem(snippet))
+
+    # ---------- Log ----------
+    def build_log_page(self) -> QtWidgets.QWidget:
+        page = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(page)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(18)
+
+        layout.addWidget(self.section_header(
+            "Журнал событий",
+            "Все ключевые сообщения приложения — от импорта до поиска — собираются здесь для удобного контроля."
+        ))
+
+        card = self.create_card()
+        card_layout = card.layout()
+        self.log_box = QtWidgets.QPlainTextEdit()
+        self.log_box.setReadOnly(True)
+        self.log_box.setPlaceholderText("Сообщения появятся во время работы приложения.")
+        card_layout.addWidget(self.log_box)
+        layout.addWidget(card, 1)
+        layout.addStretch(1)
+        return page
+
+    def _warm_cache_if_needed(self, step_each=8000):
+        if self.search_cache is None:
+            qdr = QdrantIndex(QDRANT_PATH)
+            self.search_cache = SearchCache(qdr)
+            self.search_cache.cache[COLL_ARTICLES] = []
+            self.search_cache.cache[COLL_CHUNKS] = []
+            self.search_cache.next_offsets[COLL_ARTICLES] = None
+            self.search_cache.next_offsets[COLL_CHUNKS] = None
+            self.log("Кеш поисковой выдачи инициализирован.")
+        total_a, done_a = self.search_cache.warm_step(COLL_ARTICLES, limit_step=step_each)
+        total_c, done_c = self.search_cache.warm_step(COLL_CHUNKS, limit_step=step_each)
+        status = f"Кэш: articles={total_a}{'✓' if done_a else ''}, chunks={total_c}{'✓' if done_c else ''}"
+        self.cache_progress_lbl.setText(status)
+        self.log(status)
+
+    def do_search(self):
+        qtxt = self.ed_query.text().strip()
+        if not qtxt:
+            return
+        k = int(self.spin_k.value())
+        use_hyde = self.chk_hyde.isChecked()
+        use_rerank = self.chk_rerank.isChecked()
+        use_client_pref = self.chk_client_pref.isChecked()
+
+        m_art = re.search(r"ст\.?\s*(\d+(?:\.\d+)*)", qtxt.lower())
+        if m_art and self.spin_fuse_title.value() < 0.55:
+            self.spin_fuse_title.setValue(0.55)
+
+        w_title = float(self.spin_fuse_title.value())
+        w_body = 1.0 - w_title
+
+        as_of = self.ed_asof.date().toString("yyyy-MM-dd")
+        today = QtCore.QDate.currentDate().toString("yyyy-MM-dd")
+        if not as_of or as_of == today:
+            as_of_iso = None
+        else:
+            try:
+                _ = dtparser.parse(as_of)
+                as_of_iso = f"{as_of}T23:59:59Z"
+            except Exception:
+                QtWidgets.QMessageBox.warning(self, "as_of", f"Дата as_of не распознана: {as_of}. Поиск без фильтра.")
+                self.log(f"as_of parse failed: {as_of}")
+                as_of_iso = None
+
+        key = os.environ.get("OPENAI_API_KEY", "") or OPENAI_API_KEY_DEFAULT
+        try:
+            emb = Embedder(key)
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, "OpenAI", f"Embedder: {e}")
+            return
+
+        gpt_for_hyde = GPTMini(key) if key else None
+        qemb = QueryEmbedder(emb, gpt_for_hyde, use_hyde=use_hyde)
+
+        self._warm_cache_if_needed(step_each=8000)
+
+        qdr = self.search_cache.qdr
+
+        def prefilter(collection: str) -> Tuple[List[str], List]:
+            payload_pts = list(self.search_cache.cache.get(collection, []))
+            if as_of_iso and use_client_pref:
+                try:
+                    cut = dtparser.parse(as_of_iso).date()
+                    def to_date(x):
+                        try:
+                            return dtparser.parse(x).date()
+                        except Exception:
+                            return None
+                    def alive(pl: Dict) -> bool:
+                        ef = to_date(pl.get("effective_from"))
+                        et = to_date(pl.get("effective_to"))
+                        st = (pl.get("status") or "").lower()
+                        if ef and cut < ef:
+                            return False
+                        if et and cut > et:
+                            return False
+                        if "утрат" in st and (not et or cut >= et):
+                            return False
+                        return True
+                    payload_pts = [p for p in payload_pts if alive(p.payload or {})]
+                except Exception as e:
+                    logger.warning(f"as_of parse in prefilter: {e}")
+            ids = keyword_prefilter(payload_pts, qtxt, topk=300) if use_client_pref else []
+            return ids, payload_pts
+
+        ids_a, _ = prefilter(COLL_ARTICLES)
+        ids_c, _ = prefilter(COLL_CHUNKS)
+
+        q_title = list(qemb.embed_title_cached(qtxt))
+        q_body = list(qemb.embed_body_hyde_cached(qtxt))
+
+        def search_ids_rrf(collection, vector_name_title, vector_name_body, qvec_title, qvec_body, ids_prefilter, limit_each, as_of_iso):
+            ranks_title: Dict[str, int] = {}
+            ranks_body: Dict[str, int] = {}
+            filters = make_asof_filters_strict(as_of_iso)
+
+            def run_one(using_name: str, qvec: List[float]) -> List[str]:
+                out_ids: List[str] = []
+                for flt in filters:
+                    base_filter = qm.Filter(must=[qm.HasIdCondition(has_id=ids_prefilter)]) if ids_prefilter else None
+                    if flt and base_filter:
+                        qf = qm.Filter(must=(base_filter.must + flt.must), should=(flt.should or []))
+                    else:
+                        qf = base_filter or flt
+                    res = qdr.client.query_points(
+                        collection_name=collection,
+                        query=qm.NamedQuery(
+                            name=using_name,
+                            vector=qvec,
+                            limit=limit_each,
+                            filter=qf,
+                        ),
+                        with_payload=False,
+                        with_vectors=False,
+                    )
+                    if res:
+                        out_ids.extend([str(p.id) for p in res])
+                return list(dict.fromkeys(out_ids))[:limit_each]
+
+            ids_t = run_one(vector_name_title, qvec_title)
+            ids_b = run_one(vector_name_body, qvec_body)
+
+            ranks_title.update({pid: i + 1 for i, pid in enumerate(ids_t)})
+            ranks_body.update({pid: i + 1 for i, pid in enumerate(ids_b)})
+
+            return rrf_scores(ranks_title), rrf_scores(ranks_body)
+
+        limit_each = max(20, k * 3)
+
+        title_rrf_a, body_rrf_a = search_ids_rrf(
+            COLL_ARTICLES, "title_vec", "body_vec", q_title, q_body, ids_a, limit_each, as_of_iso
+        )
+        fused_a = combine_rrf_weighted(title_rrf_a, body_rrf_a, w_title, w_body)
+
+        title_rrf_c, body_rrf_c = search_ids_rrf(
+            COLL_CHUNKS, "title_vec", "body_vec", q_title, q_body, ids_c, limit_each, as_of_iso
+        )
+        fused_c = combine_rrf_weighted(title_rrf_c, body_rrf_c, w_title, w_body)
+
+        fused_all: Dict[str, float] = {}
+        for dct in (fused_a, fused_c):
+            for pid, sc in dct.items():
+                fused_all[pid] = fused_all.get(pid, 0.0) + sc
+
+        ranked_ids = [pid for pid, _ in sorted(fused_all.items(), key=lambda x: x[1], reverse=True)]
+        id2payload = {}
+        for pid in ranked_ids:
+            p = self.search_cache.id2point.get(pid)
+            if p:
+                id2payload[pid] = p.payload or {}
+        m = re.search(r"ст\.?\s*(\d+(?:\.\d+)*)", qtxt.lower())
+        target_art = m.group(1) if m else None
+        boost_exact_article(fused_all, id2payload, target_art)
+        ranked_ids = [pid for pid, _ in sorted(fused_all.items(), key=lambda x: x[1], reverse=True)]
+
+        def pick_points_from_cache(ids_sorted: List[str]) -> List:
+            out = []
+            for pid in ids_sorted:
+                p = self.search_cache.id2point.get(pid)
+                if p is not None:
+                    out.append(p)
+            return out
+
+        prelim_points = pick_points_from_cache(ranked_ids)[:max(20, k * 4)]
+
+        gpt_for_rerank = GPTMini(key) if (key and use_rerank) else None
+        if gpt_for_rerank:
+            cands = []
+            id2p = {}
+            for p in prelim_points:
+                pl = p.payload or {}
+                qid = str(getattr(p, "id", "") or "")
+                if not qid:
+                    continue
+                cands.append({
+                    "id": qid,
+                    "title": pl.get("title"),
+                    "meta": f"Часть: {pl.get('part')}; Глава: {pl.get('chapter')}; Статья: {pl.get('article')}",
+                    "text": pl.get("text") or "",
+                })
+                id2p[qid] = p
+            reranked = gpt_for_rerank.rerank(qtxt, cands, topk=max(k, 3))
+            top_ids = [cid for cid, _ in reranked]
+            points = [id2p[pid] for pid in top_ids if pid in id2p]
+        else:
+            points = prelim_points[:k]
+
+        follow_articles = []
+        for p in points:
+            refs = (p.payload or {}).get("references") or []
+            for a in refs[:3]:
+                follow_articles.append(a)
+        follow_articles = list(dict.fromkeys(follow_articles))[:5]
+
+        extra_points = []
+        for a in follow_articles:
+            try:
+                extra_points += fetch_by_article(qdr, COLL_ARTICLES, a, limit=1)
+            except Exception as e:
+                logger.warning(f"xref fetch: {e}")
+
+        all_points = points + extra_points
+        final_points = dedup_limit(all_points, k)
+
+        out = [
+            "<style>",
+            "body {background:transparent;color:#e2e8f0;font-family:'Inter','Segoe UI',sans-serif;}",
+            ".result-card {background:rgba(15,23,42,0.72);border:1px solid rgba(148,163,184,0.25);border-radius:18px;padding:18px;margin:12px 0;box-shadow:0 18px 36px rgba(15,23,42,0.45);}",
+            ".result-card h4 {margin:0 0 8px;font-size:18px;color:#38bdf8;}",
+            ".result-meta {display:flex;flex-wrap:wrap;gap:8px;margin-bottom:10px;font-size:12px;color:#cbd5f5;}",
+            ".badge {background:rgba(56,189,248,0.15);border:1px solid rgba(56,189,248,0.4);border-radius:999px;padding:2px 10px;}",
+            ".result-summary {font-style:italic;color:#f8fafc;margin-bottom:10px;}",
+            "pre {background:rgba(15,23,42,0.9);border-radius:12px;padding:12px;white-space:pre-wrap;font-family:'JetBrains Mono','Fira Code',monospace;font-size:13px;color:#e2e8f0;}",
+            "</style><h3>Результаты</h3>",
+        ]
+        self._last_rag_blocks = []
+        if not final_points:
+            out.append("<i>Пусто.</i>")
+        else:
+            for p in final_points:
+                pl = p.payload or {}
+                title = pl.get("title") or ""
+                part = pl.get("part") or "—"
+                ch = pl.get("chapter") or "—"
+                art = pl.get("article") or "—"
+                anchor = pl.get("anchor") or ""
+                src = pl.get("source") or ""
+                summ = pl.get("semantic_summary") or ""
+                snippet = safe_html((pl.get("text") or "")[:900])
+                out.append(
+                    "<div class='result-card'>"
+                    f"<h4>{safe_html(title)}</h4>"
+                    f"<div class='result-meta'><span class='badge'>Часть: {safe_html(str(part))}</span>"
+                    f"<span class='badge'>Глава: {safe_html(str(ch))}</span>"
+                    f"<span class='badge'>Статья: {safe_html(str(art))}</span></div>"
+                    f"<div class='result-summary'>{safe_html(summ)}</div>"
+                    f"<div style='font-size:12px;color:#94a3b8;margin-bottom:8px;'>{safe_html(anchor)} · {safe_html(src)}</div>"
+                    f"<pre>{snippet}…</pre>"
+                    "</div>"
+                )
+                self._last_rag_blocks.append(pl.get("formatted_text") or pl.get("text", ""))
+
+            out.append("<h4>Контекст для GPT</h4>")
+            sep = "\n\n---\n\n"
+            joined_ctx = sep.join(self._last_rag_blocks)
+            out.append("<pre style='white-space:pre-wrap;font-family:inherit;background:rgba(15,23,42,0.85);border-radius:12px;padding:14px;'>" + safe_html(joined_ctx) + "</pre>")
+
+        if self._last_rag_blocks and (gpt_for_rerank is not None):
+            ans = gpt_for_rerank.answer_with_context(qtxt, self._last_rag_blocks)
+            out.append("<h4>Черновой ответ GPT-mini</h4>")
+            out.append(f"<div style='white-space:pre-wrap;border:1px solid rgba(148,163,184,0.3);border-radius:12px;padding:12px;background:rgba(15,23,42,0.7);'>{safe_html(ans)}</div>")
+
+        self.results.setHtml("\n".join(out))
 
 
 # ============================
@@ -2156,10 +2786,11 @@ def main():
         sys.exit(rc)
     else:
         app = QtWidgets.QApplication(sys.argv)
-        app.setApplicationName("ГК РФ — Индексатор v3.7")
+        app.setApplicationName("ГК РФ — Индексатор v4 · Vector Studio")
+        app.setStyleSheet(APP_STYLESHEET)
         win = MainWindow()
         win.show()
-        sys.exit(app.exec_())
+        sys.exit(app.exec())
 
 
 if __name__ == "__main__":
