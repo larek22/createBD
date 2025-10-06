@@ -5,6 +5,7 @@
 - Полностью обновлённый интерфейс на PySide6 с современным тёмным стилем и боковой навигацией.
 - Подсказки и пояснения к каждой настройке: от импорта до поиска и Vector Lab.
 - Расширенный анализ исходных документов, визуальные карточки результатов и Vector Lab для экспериментов.
+- Встроенная проверка качества: автоматические тесты TOP-1/TOP-3 и отчёт о проблемных запросах.
 - Stream upsert (батчами) без роста RAM; кэш эмбеддингов (SQLite).
 - Переключатель HyDE; адаптивный вес title для «ст. NNN».
 - Ленивая прогревка кэша + индикатор; кнопка «Очистить кэш».
@@ -465,6 +466,46 @@ class LawDoc:
     effective_from: Optional[str] = None   # ISO 8601
     effective_to: Optional[str] = None     # ISO 8601
     status: Optional[str] = "действует"
+
+
+@dataclass
+class SearchOptions:
+    query: str
+    top_k: int
+    as_of_iso: Optional[str]
+    use_hyde: bool
+    title_weight: float
+    use_client_prefilter: bool = True
+
+
+@dataclass
+class SearchHit:
+    point_id: str
+    score: float
+    payload: Dict[str, Any]
+
+
+@dataclass
+class SearchOutcome:
+    hits: List[SearchHit]
+    direct_hits: List[SearchHit]
+    debug: Dict[str, Any]
+
+
+@dataclass
+class QualityTestCase:
+    label: str
+    query: str
+    expected_article: Optional[str]
+    source_title: str
+    meta: Dict[str, Any]
+
+
+@dataclass
+class QualityReport:
+    summary: str
+    table_html: str
+    raw_results: List[Dict[str, Any]]
 
 
 # ============================
@@ -949,6 +990,207 @@ class SearchCache:
 # ============================
 # Prefilter / Fusion / Helpers
 # ============================
+class SearchEngine:
+    """Переиспользуемый движок поиска для UI, тестов и CLI."""
+
+    def __init__(self, cache: SearchCache, embedder: Embedder, gpt: Optional[GPTMini]):
+        self.cache = cache
+        self.embedder = embedder
+        self.gpt = gpt
+        self._query_embedder = {
+            True: QueryEmbedder(embedder, gpt, use_hyde=True),
+            False: QueryEmbedder(embedder, gpt, use_hyde=False),
+        }
+
+    def _prefilter(self, collection: str, query: str, as_of_iso: Optional[str], use_client_pref: bool) -> List[str]:
+        payload_pts = list(self.cache.cache.get(collection, []))
+        if as_of_iso and use_client_pref:
+            try:
+                cut = dtparser.parse(as_of_iso).date()
+
+                def to_date(x):
+                    try:
+                        return dtparser.parse(x).date()
+                    except Exception:
+                        return None
+
+                def alive(pl: Dict) -> bool:
+                    ef = to_date(pl.get("effective_from"))
+                    et = to_date(pl.get("effective_to"))
+                    st = (pl.get("status") or "").lower()
+                    if ef and cut < ef:
+                        return False
+                    if et and cut > et:
+                        return False
+                    if "утрат" in st and (not et or cut >= et):
+                        return False
+                    return True
+
+                payload_pts = [p for p in payload_pts if alive(p.payload or {})]
+            except Exception as e:
+                logger.warning(f"as_of parse in prefilter: {e}")
+        if not use_client_pref:
+            return []
+        return keyword_prefilter(payload_pts, query, topk=300)
+
+    def _points_from_ids(self, ids_sorted: List[str]) -> List:
+        out = []
+        for pid in ids_sorted:
+            p = self.cache.id2point.get(pid)
+            if p is not None:
+                out.append(p)
+        return out
+
+    def _ensure_known_points(self, points: List) -> None:
+        for p in points:
+            pid = str(getattr(p, "id", "") or "")
+            if pid:
+                self.cache.id2point[pid] = p
+
+    def run(self, options: SearchOptions) -> SearchOutcome:
+        qtxt = options.query
+        k = max(1, options.top_k)
+        w_title = max(0.0, min(1.0, options.title_weight))
+        w_body = 1.0 - w_title
+
+        query_embedder = self._query_embedder[options.use_hyde]
+        q_title = list(query_embedder.embed_title_cached(qtxt))
+        q_body = list(query_embedder.embed_body_hyde_cached(qtxt))
+
+        ids_a = self._prefilter(COLL_ARTICLES, qtxt, options.as_of_iso, options.use_client_prefilter)
+        ids_c = self._prefilter(COLL_CHUNKS, qtxt, options.as_of_iso, options.use_client_prefilter)
+
+        debug_meta: Dict[str, Any] = {
+            "prefilter_articles": len(ids_a),
+            "prefilter_chunks": len(ids_c),
+        }
+
+        filters = make_asof_filters_strict(options.as_of_iso)
+
+        def run_search(collection: str, vector_name_title: str, vector_name_body: str, ids_prefilter: List[str]):
+            ranks_title: Dict[str, int] = {}
+            ranks_body: Dict[str, int] = {}
+
+            def _list(val):
+                return list(val) if val else []
+
+            def combine_filters(base: Optional[qm.Filter], extra: Optional[qm.Filter]) -> Optional[qm.Filter]:
+                if not base and not extra:
+                    return None
+                if not base:
+                    return extra
+                if not extra:
+                    return base
+                return qm.Filter(
+                    must=_list(base.must) + _list(extra.must),
+                    should=_list(base.should) + _list(extra.should),
+                    must_not=_list(base.must_not) + _list(extra.must_not),
+                )
+
+            def _call_search(vector_name: str, vector_payload: List[float], flt: Optional[qm.Filter]) -> List[Any]:
+                attempts = [
+                    {"query_vector": (vector_name, vector_payload)},
+                    {"query_vector": {"name": vector_name, "vector": vector_payload}},
+                ]
+                results: List[Any] = []
+                limit_each = max(20, k * 3)
+                for base in attempts:
+                    for filter_key in ("query_filter", "filter"):
+                        kwargs = dict(
+                            collection_name=collection,
+                            limit=limit_each,
+                            with_payload=False,
+                            with_vectors=False,
+                        )
+                        kwargs.update(base)
+                        if flt is not None:
+                            kwargs[filter_key] = flt
+                        try:
+                            res = self.cache.qdr.client.search(**kwargs)
+                        except TypeError:
+                            continue
+                        else:
+                            if res:
+                                results.extend(res)
+                            return results
+                return results
+
+            def run_one(vector_name: str, qvec: List[float]) -> List[str]:
+                out_ids: List[str] = []
+                base_filter = qm.Filter(must=[qm.HasIdCondition(has_id=ids_prefilter)]) if ids_prefilter else None
+                for flt in filters:
+                    merged = combine_filters(base_filter, flt)
+                    res = _call_search(vector_name, qvec, merged)
+                    if res:
+                        out_ids.extend([str(p.id) for p in res])
+                return list(dict.fromkeys(out_ids))[: max(20, k * 3)]
+
+            ids_t = run_one(vector_name_title, q_title)
+            ids_b = run_one(vector_name_body, q_body)
+
+            ranks_title.update({pid: i + 1 for i, pid in enumerate(ids_t)})
+            ranks_body.update({pid: i + 1 for i, pid in enumerate(ids_b)})
+
+            return rrf_scores(ranks_title), rrf_scores(ranks_body)
+
+        title_rrf_a, body_rrf_a = run_search(COLL_ARTICLES, "title_vec", "body_vec", ids_a)
+        fused_a = combine_rrf_weighted(title_rrf_a, body_rrf_a, w_title, w_body)
+
+        title_rrf_c, body_rrf_c = run_search(COLL_CHUNKS, "title_vec", "body_vec", ids_c)
+        fused_c = combine_rrf_weighted(title_rrf_c, body_rrf_c, w_title, w_body)
+
+        fused_all: Dict[str, float] = {}
+        for dct in (fused_a, fused_c):
+            for pid, sc in dct.items():
+                fused_all[pid] = fused_all.get(pid, 0.0) + sc
+
+        target_art = None
+        m = re.search(r"ст\.?\s*(\d+(?:\.\d+)*)", qtxt.lower())
+        if m:
+            target_art = m.group(1)
+
+        direct_points: List[Any] = []
+        if target_art:
+            try:
+                direct_points.extend(fetch_by_article(self.cache.qdr, COLL_ARTICLES, target_art, limit=3))
+                direct_points.extend(fetch_by_article(self.cache.qdr, COLL_CHUNKS, target_art, limit=2))
+            except Exception as e:
+                logger.debug(f"direct article fetch failed: {e}")
+            self._ensure_known_points(direct_points)
+            for p in direct_points:
+                pid = str(getattr(p, "id", "") or "")
+                if pid:
+                    fused_all[pid] = fused_all.get(pid, 0.0) + 2.5
+
+        ranked_ids = [pid for pid, _ in sorted(fused_all.items(), key=lambda x: x[1], reverse=True)]
+
+        ranked_points = self._points_from_ids(ranked_ids)
+        ranked_points = dedup_limit(ranked_points, max(k * 2, k + 2))
+
+        hits: List[SearchHit] = []
+        for p in ranked_points[:k]:
+            pid = str(getattr(p, "id", "") or "")
+            payload = p.payload or {}
+            score = fused_all.get(pid, 0.0)
+            hits.append(SearchHit(point_id=pid, score=score, payload=payload))
+
+        direct_hits: List[SearchHit] = []
+        for p in direct_points:
+            pid = str(getattr(p, "id", "") or "")
+            if not pid:
+                continue
+            payload = p.payload or {}
+            direct_hits.append(SearchHit(point_id=pid, score=fused_all.get(pid, 0.0), payload=payload))
+
+        debug_meta.update(
+            {
+                "fused_articles": len(fused_a),
+                "fused_chunks": len(fused_c),
+                "direct_article": target_art,
+            }
+        )
+
+        return SearchOutcome(hits=hits, direct_hits=direct_hits, debug={"scores": fused_all, "meta": debug_meta})
 def keyword_prefilter(payload_points: List, query: str, topk: int = 300) -> List[str]:
     q = query.lower()
     keys = set(re.findall(r"[А-Яа-яA-Za-z]{3,}", q))
@@ -991,14 +1233,6 @@ def dedup_limit(points: List, k: int) -> List:
         seen.add(key)
         if len(out) >= k: break
     return out
-
-
-def boost_exact_article(scores_map: Dict[str,float], pts_map: Dict[str,dict], target_art: Optional[str]) -> None:
-    if not target_art: return
-    for pid, sc in list(scores_map.items()):
-        pl = pts_map.get(pid) or {}
-        if (pl.get("article") or "") == target_art:
-            scores_map[pid] = sc + 0.15
 
 
 def fetch_by_article(qdr: QdrantIndex, collection: str, art_value: str, limit=3) -> List:
@@ -1107,6 +1341,161 @@ class IndexWorker(QtCore.QThread):
             self.failed.emit(str(e))
 
 
+class QualityWorker(QtCore.QThread):
+    progressChanged = QtCore.Signal(int, str)
+    finishedReport = QtCore.Signal(QualityReport)
+    failed = QtCore.Signal(str)
+
+    def __init__(
+        self,
+        *,
+        cases: List[QualityTestCase],
+        cache: SearchCache,
+        api_key: str,
+        top_k: int,
+        use_hyde: bool,
+        title_weight: float,
+        use_client_pref: bool,
+        parent=None,
+    ):
+        super().__init__(parent)
+        self.cases = cases
+        self.cache = cache
+        self.api_key = api_key
+        self.top_k = top_k
+        self.use_hyde = use_hyde
+        self.title_weight = title_weight
+        self.use_client_pref = use_client_pref
+        self._cancel = False
+
+    def cancel(self):
+        self._cancel = True
+
+    def run(self):
+        try:
+            if not self.cases:
+                raise RuntimeError("Нет подготовленных тестовых запросов.")
+
+            embedder = Embedder(self.api_key)
+            gpt = GPTMini(self.api_key) if self.use_hyde else None
+            engine = SearchEngine(self.cache, embedder, gpt)
+
+            total = len(self.cases)
+            evaluated: List[Dict[str, Any]] = []
+            per_label: Dict[str, Dict[str, int]] = {}
+            success_top1 = success_top3 = total_with_expectation = 0
+
+            for idx, case in enumerate(self.cases, 1):
+                if self._cancel:
+                    raise RuntimeError("Проверка остановлена пользователем")
+
+                opts = SearchOptions(
+                    query=case.query,
+                    top_k=self.top_k,
+                    as_of_iso=None,
+                    use_hyde=self.use_hyde,
+                    title_weight=self.title_weight,
+                    use_client_prefilter=self.use_client_pref,
+                )
+
+                outcome = engine.run(opts)
+                hits = outcome.hits
+                top_articles = [str((h.payload or {}).get("article") or "") for h in hits]
+                expected = str(case.expected_article) if case.expected_article is not None else None
+                top1 = top_articles[0] if top_articles else None
+                top3 = top_articles[:3]
+
+                ok_top1 = expected is not None and top1 is not None and top1 == expected
+                ok_top3 = expected is not None and expected in top3
+
+                if expected is not None:
+                    total_with_expectation += 1
+                    if ok_top1:
+                        success_top1 += 1
+                    if ok_top3:
+                        success_top3 += 1
+
+                label_stats = per_label.setdefault(case.label, {"total": 0, "top1": 0, "top3": 0})
+                label_stats["total"] += 1
+                if ok_top1:
+                    label_stats["top1"] += 1
+                if ok_top3:
+                    label_stats["top3"] += 1
+
+                evaluated.append(
+                    {
+                        "label": case.label,
+                        "query": case.query,
+                        "expected": expected,
+                        "top1": top1,
+                        "top3": top3,
+                        "success_top1": ok_top1,
+                        "success_top3": ok_top3,
+                        "source_title": case.source_title,
+                        "meta": case.meta,
+                    }
+                )
+
+                pct = int((idx / max(1, total)) * 100)
+                self.progressChanged.emit(pct, f"Тест {idx}/{total}: {case.label}")
+
+            summary_lines = []
+            if total_with_expectation:
+                top1_rate = success_top1 / total_with_expectation * 100
+                top3_rate = success_top3 / total_with_expectation * 100
+                summary_lines.append(f"TOP-1 точность: {top1_rate:.1f}%")
+                summary_lines.append(f"TOP-3 точность: {top3_rate:.1f}%")
+            else:
+                summary_lines.append("Нет тестов с заданным ожидаемым номером статьи.")
+
+            label_lines = []
+            for label, stats in per_label.items():
+                total_l = stats["total"] or 1
+                label_lines.append(
+                    f"{label}: TOP-1 {stats['top1'] / total_l * 100:.1f}% · TOP-3 {stats['top3'] / total_l * 100:.1f}% (n={stats['total']})"
+                )
+            if label_lines:
+                summary_lines.append("<br>".join(label_lines))
+
+            failures = [r for r in evaluated if r.get("expected") and not r.get("success_top1")]
+            table_rows = [
+                "<table style='width:100%;border-collapse:collapse;margin-top:12px;'>",
+                "<tr style='background:rgba(59,130,246,0.25);color:#f8fafc;'>"
+                "<th style='padding:6px;border:1px solid rgba(148,163,184,0.2);'>Тип</th>"
+                "<th style='padding:6px;border:1px solid rgba(148,163,184,0.2);'>Запрос</th>"
+                "<th style='padding:6px;border:1px solid rgba(148,163,184,0.2);'>Ожидание</th>"
+                "<th style='padding:6px;border:1px solid rgba(148,163,184,0.2);'>TOP-1</th>"
+                "<th style='padding:6px;border:1px solid rgba(148,163,184,0.2);'>TOP-3</th>"
+                "<th style='padding:6px;border:1px solid rgba(148,163,184,0.2);'>Источник</th>"
+                "</tr>",
+            ]
+            for row in failures[:80]:
+                table_rows.append(
+                    "<tr>"
+                    f"<td style='padding:6px;border:1px solid rgba(148,163,184,0.15);'>{safe_html(row['label'])}</td>"
+                    f"<td style='padding:6px;border:1px solid rgba(148,163,184,0.15);'>{safe_html(row['query'])}</td>"
+                    f"<td style='padding:6px;border:1px solid rgba(148,163,184,0.15);'>{safe_html(row.get('expected') or '—')}</td>"
+                    f"<td style='padding:6px;border:1px solid rgba(148,163,184,0.15);'>{safe_html(row.get('top1') or '—')}</td>"
+                    f"<td style='padding:6px;border:1px solid rgba(148,163,184,0.15);'>{safe_html(', '.join(filter(None, row.get('top3') or [])))}</td>"
+                    f"<td style='padding:6px;border:1px solid rgba(148,163,184,0.15);'>{safe_html(row.get('source_title') or '—')}</td>"
+                    "</tr>"
+                )
+            if len(table_rows) == 1:
+                table_rows.append(
+                    "<tr><td colspan='6' style='padding:8px;border:1px solid rgba(148,163,184,0.15);color:#94a3b8;'>Все запросы попали в TOP-1.</td></tr>"
+                )
+            table_rows.append("</table>")
+
+            report = QualityReport(
+                summary="<br>".join(summary_lines),
+                table_html="".join(table_rows),
+                raw_results=evaluated,
+            )
+            self.finishedReport.emit(report)
+        except Exception as e:
+            self.failed.emit(str(e))
+
+
 # ============================
 # LRU-кэш эмбеддингов запроса (RAM)
 # ============================
@@ -1148,6 +1537,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.search_cache: Optional[SearchCache] = None
         self._last_vector: Optional[List[float]] = None
         self._last_rag_blocks: List[str] = []
+        self._last_search_outcome: Optional[SearchOutcome] = None
+        self._embedder_client: Optional[Embedder] = None
+        self._embedder_key: Optional[str] = None
+        self._gptmini_client: Optional[GPTMini] = None
+        self.quality_thread: Optional[QualityWorker] = None
+        self.quality_last_report: Optional[QualityReport] = None
 
         central = QtWidgets.QWidget()
         central_layout = QtWidgets.QVBoxLayout(central)
@@ -1192,6 +1587,9 @@ class MainWindow(QtWidgets.QMainWindow):
         search_page = self.build_search_page()
         self.register_page("3️⃣ Поиск", "Шаг 3. Проверяйте базу: задавайте вопросы и просматривайте найденные нормы.", search_page)
 
+        quality_page = self.build_quality_page()
+        self.register_page("4️⃣ Проверка", "Шаг 4. Автоматически протестируйте базу и получите отчёт по точности.", quality_page)
+
         vector_page = self.build_vector_lab_page()
         self.register_page("🔬 Лаборатория", "Необязательный модуль для экспериментов с эмбеддингами и отладкой Qdrant.", vector_page)
 
@@ -1228,6 +1626,7 @@ class MainWindow(QtWidgets.QMainWindow):
             "<li><b>Импорт</b> — добавьте документы и проверьте автоматическую аналитику.</li>"
             "<li><b>Индексация</b> — введите ключ OpenAI и отправьте статьи в Qdrant.</li>"
             "<li><b>Поиск</b> — задайте вопрос и изучите найденные нормы.</li>"
+            "<li><b>Проверка</b> — запустите автоматический отчёт, чтобы убедиться в релевантности.</li>"
             "<li><b>Справка</b> — откройте подсказки, если что-то неочевидно.</li>"
             "</ol>"
         )
@@ -1328,6 +1727,27 @@ class MainWindow(QtWidgets.QMainWindow):
         if hasattr(self, "log_box"):
             self.log_box.appendPlainText(f"[{ts}] {msg}")
         logger.info(msg)
+
+    def get_embedder(self, key: str) -> Embedder:
+        if not key:
+            raise RuntimeError("Укажите OpenAI API Key в настройках индексации.")
+        if self._embedder_client is None or self._embedder_key != key:
+            self._embedder_client = Embedder(key)
+            self._embedder_key = key
+            # Обнулим кэш GPT-mini, чтобы использовать ту же пару ключей
+            self._gptmini_client = None
+        return self._embedder_client
+
+    def get_gptmini(self, key: str) -> Optional[GPTMini]:
+        if not key:
+            return None
+        if self._gptmini_client is None or self._embedder_key != key:
+            try:
+                self._gptmini_client = GPTMini(key)
+            except Exception as e:
+                logger.warning(f"GPTMini init failed: {e}")
+                self._gptmini_client = None
+        return self._gptmini_client
 
     def update_analysis_view(self, path: str):
         data = self.analysis_per_file.get(path)
@@ -2095,6 +2515,274 @@ class MainWindow(QtWidgets.QMainWindow):
         layout.addStretch(1)
         return page
 
+    def build_quality_page(self) -> QtWidgets.QWidget:
+        page = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(page)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(18)
+
+        layout.addWidget(self.section_header(
+            "Проверка качества", "Шаг четвёртый: автоматический тест покрывает запросы по номерам статей, выжимкам и ключевым словам."
+        ))
+
+        intro_card = self.create_card()
+        intro_layout = intro_card.layout()
+        intro_text = QtWidgets.QLabel(
+            "<b>Как читать отчёт:</b> тесты используют текущие настройки поиска (HyDE, вес заголовка, клиентский префильтр)."
+            " Если вы меняете параметры — запустите проверку снова и сравните показатели TOP-1/TOP-3."
+        )
+        intro_text.setWordWrap(True)
+        intro_text.setObjectName("OptionHint")
+        intro_layout.addWidget(intro_text)
+        layout.addWidget(intro_card)
+
+        options_card = self.create_card()
+        options_layout = options_card.layout()
+
+        grid = QtWidgets.QGridLayout()
+        grid.setHorizontalSpacing(18)
+        grid.setVerticalSpacing(10)
+
+        self.quality_spin_articles = QtWidgets.QSpinBox()
+        self.quality_spin_articles.setRange(5, 500)
+        self.quality_spin_articles.setValue(80)
+        row = self.add_option_row(
+            grid, 0,
+            "Сколько статей проверять",
+            self.quality_spin_articles,
+            "Количество запросов вида «ст. NNN». Остальные тесты ограничатся тем же числом."
+        )
+
+        self.quality_chk_summaries = QtWidgets.QCheckBox("Включить")
+        self.quality_chk_summaries.setChecked(True)
+        row = self.add_toggle_row(
+            grid, row,
+            "Тест запросов по summary",
+            self.quality_chk_summaries,
+            "Из кратких выжимок формируется запрос, который должен вернуть ту же статью. Помогает оценить общую семантику."
+        )
+
+        self.quality_chk_keywords = QtWidgets.QCheckBox("Включить")
+        self.quality_chk_keywords.setChecked(True)
+        row = self.add_toggle_row(
+            grid, row,
+            "Тест запросов по ключевым словам",
+            self.quality_chk_keywords,
+            "Из топовых ключевых слов статьи строится короткий запрос. Полезно, если пользователи ищут тематические фразы."
+        )
+
+        self.quality_spin_topk = QtWidgets.QSpinBox()
+        self.quality_spin_topk.setRange(1, 10)
+        self.quality_spin_topk.setValue(5)
+        row = self.add_option_row(
+            grid, row,
+            "Размер выдачи (k)",
+            self.quality_spin_topk,
+            "Сколько результатов анализировать для каждого теста. TOP-3 метрика берёт первые три из этого списка."
+        )
+
+        options_layout.addLayout(grid)
+
+        buttons = QtWidgets.QHBoxLayout()
+        self.btn_quality_run = QtWidgets.QPushButton("Запустить проверку")
+        self.btn_quality_run.clicked.connect(self.run_quality_suite)
+        self.btn_quality_cancel = QtWidgets.QPushButton("Отмена")
+        self.btn_quality_cancel.clicked.connect(self.cancel_quality_suite)
+        self.btn_quality_cancel.setEnabled(False)
+        self.btn_quality_export = QtWidgets.QPushButton("Экспорт отчёта…")
+        self.btn_quality_export.clicked.connect(self.export_quality_report)
+        self.btn_quality_export.setEnabled(False)
+        buttons.addWidget(self.btn_quality_run)
+        buttons.addWidget(self.btn_quality_cancel)
+        buttons.addWidget(self.btn_quality_export)
+        buttons.addStretch(1)
+        options_layout.addLayout(buttons)
+
+        self.quality_progress = QtWidgets.QProgressBar()
+        self.quality_progress.setRange(0, 100)
+        self.quality_progress.setValue(0)
+        options_layout.addWidget(self.quality_progress)
+
+        layout.addWidget(options_card)
+
+        report_card = self.create_card()
+        report_layout = report_card.layout()
+        self.quality_report_view = QtWidgets.QTextBrowser()
+        self.quality_report_view.setPlaceholderText("После запуска здесь появится подробный отчёт по точности.")
+        report_layout.addWidget(self.quality_report_view)
+        layout.addWidget(report_card, 1)
+
+        layout.addStretch(1)
+        return page
+
+    def collect_quality_cases(self, max_articles: int, include_summaries: bool, include_keywords: bool) -> List[QualityTestCase]:
+        if self.search_cache is None:
+            return []
+
+        target_articles = max(1, max_articles)
+
+        # Убедимся, что подгружены нужные документы
+        loaded_articles = len(self.search_cache.cache.get(COLL_ARTICLES, []) or [])
+        while loaded_articles < target_articles and self.search_cache.next_offsets.get(COLL_ARTICLES):
+            loaded_articles, done = self.search_cache.warm_step(COLL_ARTICLES, limit_step=8000)
+            if done:
+                break
+
+        points = list(self.search_cache.cache.get(COLL_ARTICLES, []) or [])
+        cases: List[QualityTestCase] = []
+        count_article = count_summary = count_keywords = 0
+
+        for p in points:
+            payload = p.payload or {}
+            art = payload.get("article")
+            if not art:
+                continue
+            title = payload.get("title") or ""
+            meta = {"anchor": payload.get("anchor") or ""}
+
+            if count_article < target_articles:
+                cases.append(QualityTestCase(
+                    label="article",
+                    query=f"ст. {art}",
+                    expected_article=str(art),
+                    source_title=title,
+                    meta=meta,
+                ))
+                count_article += 1
+
+            if include_summaries and count_summary < target_articles:
+                summary = (payload.get("semantic_summary") or "").strip()
+                if summary:
+                    cases.append(QualityTestCase(
+                        label="summary",
+                        query=summary,
+                        expected_article=str(art),
+                        source_title=title,
+                        meta=meta,
+                    ))
+                    count_summary += 1
+
+            if include_keywords and count_keywords < target_articles:
+                topics = payload.get("topics") or []
+                if topics:
+                    query = " ".join(topics[:2]) if len(topics) >= 2 else topics[0]
+                    cases.append(QualityTestCase(
+                        label="keywords",
+                        query=query,
+                        expected_article=str(art),
+                        source_title=title,
+                        meta=meta,
+                    ))
+                    count_keywords += 1
+
+            if count_article >= target_articles and (not include_summaries or count_summary >= target_articles) and (
+                not include_keywords or count_keywords >= target_articles
+            ):
+                break
+
+        return cases
+
+    def run_quality_suite(self):
+        if self.quality_thread and self.quality_thread.isRunning():
+            QtWidgets.QMessageBox.information(self, "Проверка", "Тест уже выполняется. Подождите окончания или нажмите Отмена.")
+            return
+
+        key = self.ed_api_key.text().strip() or os.environ.get("OPENAI_API_KEY", "") or OPENAI_API_KEY_DEFAULT
+        if not key:
+            QtWidgets.QMessageBox.warning(self, "Проверка", "Укажите OpenAI API Key на вкладке индексации.")
+            return
+
+        self._warm_cache_if_needed(step_each=12000)
+        if self.search_cache is None:
+            QtWidgets.QMessageBox.warning(self, "Проверка", "Нет данных для тестирования — сначала проиндексируйте статьи.")
+            return
+
+        cases = self.collect_quality_cases(
+            self.quality_spin_articles.value(),
+            self.quality_chk_summaries.isChecked(),
+            self.quality_chk_keywords.isChecked(),
+        )
+        if not cases:
+            QtWidgets.QMessageBox.information(self, "Проверка", "Не удалось подготовить тестовые запросы. Убедитесь, что коллекция статей не пуста.")
+            return
+
+        top_k = self.quality_spin_topk.value()
+        thread = QualityWorker(
+            cases=cases,
+            cache=self.search_cache,
+            api_key=key,
+            top_k=top_k,
+            use_hyde=self.chk_hyde.isChecked(),
+            title_weight=float(self.spin_fuse_title.value()),
+            use_client_pref=self.chk_client_pref.isChecked(),
+        )
+        thread.progressChanged.connect(self.on_quality_progress)
+        thread.finishedReport.connect(self.on_quality_finished)
+        thread.failed.connect(self.on_quality_failed)
+        self.quality_thread = thread
+
+        self.btn_quality_run.setEnabled(False)
+        self.btn_quality_cancel.setEnabled(True)
+        self.btn_quality_export.setEnabled(False)
+        self.quality_progress.setValue(0)
+        self.quality_report_view.setHtml("<i>Проверка запущена…</i>")
+        self.quality_last_report = None
+        thread.start()
+
+    def cancel_quality_suite(self):
+        if self.quality_thread and self.quality_thread.isRunning():
+            self.quality_thread.cancel()
+            self.btn_quality_cancel.setEnabled(False)
+            self.log("Отмена проверки точности запрошена.")
+
+    def on_quality_progress(self, pct: int, message: str):
+        self.quality_progress.setValue(pct)
+        self.log(f"[Quality] {message}")
+
+    def on_quality_finished(self, report: QualityReport):
+        self.quality_progress.setValue(100)
+        self.quality_last_report = report
+        self.btn_quality_run.setEnabled(True)
+        self.btn_quality_cancel.setEnabled(False)
+        self.btn_quality_export.setEnabled(True)
+        summary_html = "<h3>Краткий итог</h3>" + report.summary + "<h3>Проблемные запросы</h3>" + report.table_html
+        self.quality_report_view.setHtml(summary_html)
+        self.log("Проверка качества завершена.")
+        self.quality_thread = None
+
+    def on_quality_failed(self, err: str):
+        self.quality_progress.setValue(0)
+        self.btn_quality_run.setEnabled(True)
+        self.btn_quality_cancel.setEnabled(False)
+        self.btn_quality_export.setEnabled(False)
+        self.quality_report_view.setHtml(f"<span style='color:#f87171'>Ошибка: {safe_html(err)}</span>")
+        self.log(f"[Quality] ошибка: {err}")
+        self.quality_thread = None
+
+    def export_quality_report(self):
+        if not self.quality_last_report:
+            QtWidgets.QMessageBox.information(self, "Экспорт", "Сначала выполните проверку, чтобы сформировать отчёт.")
+            return
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self,
+            "Сохранить отчёт",
+            "quality_report.html",
+            "HTML (*.html)"
+        )
+        if not path:
+            return
+        html = (
+            "<html><head><meta charset='utf-8'><title>Отчёт Vector Studio</title></head><body>"
+            "<h2>Отчёт по качеству поиска</h2>"
+            + self.quality_last_report.summary
+            + "<h3>Детализация</h3>"
+            + self.quality_last_report.table_html
+            + "</body></html>"
+        )
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(html)
+        self.log(f"Отчёт сохранён: {path}")
+
     def copy_context(self):
         if not self._last_rag_blocks:
             QtWidgets.QMessageBox.information(self, "Копирование", "Сначала выполните поиск, чтобы появился контекст.")
@@ -2166,6 +2854,7 @@ class MainWindow(QtWidgets.QMainWindow):
             "<li><b>Импорт.</b> Добавьте файлы и убедитесь, что анализ не показывает предупреждений по токенам.</li>"
             "<li><b>Индексация.</b> Введите ключ OpenAI, проверьте размерность и запустите потоковую загрузку в Qdrant.</li>"
             "<li><b>Поиск.</b> Сформулируйте вопрос, при необходимости задайте дату as-of и получите контекст.</li>"
+            "<li><b>Проверка.</b> Запустите отчёт — он покажет, какие запросы не попадают в TOP-1.</li>"
             "<li><b>Лаборатория.</b> Используйте только если нужна ручная проверка эмбеддингов или точечный upsert.</li>"
             "</ol>"
         )
@@ -2429,11 +3118,11 @@ class MainWindow(QtWidgets.QMainWindow):
         use_client_pref = self.chk_client_pref.isChecked()
 
         m_art = re.search(r"ст\.?\s*(\d+(?:\.\d+)*)", qtxt.lower())
-        if m_art and self.spin_fuse_title.value() < 0.55:
+        target_article = m_art.group(1) if m_art else None
+        if target_article and self.spin_fuse_title.value() < 0.55:
             self.spin_fuse_title.setValue(0.55)
 
         w_title = float(self.spin_fuse_title.value())
-        w_body = 1.0 - w_title
 
         as_of = self.ed_asof.date().toString("yyyy-MM-dd")
         today = QtCore.QDate.currentDate().toString("yyyy-MM-dd")
@@ -2448,193 +3137,74 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.log(f"as_of parse failed: {as_of}")
                 as_of_iso = None
 
-        key = os.environ.get("OPENAI_API_KEY", "") or OPENAI_API_KEY_DEFAULT
+        key = self.ed_api_key.text().strip() or os.environ.get("OPENAI_API_KEY", "") or OPENAI_API_KEY_DEFAULT
         try:
-            emb = Embedder(key)
+            emb = self.get_embedder(key)
         except Exception as e:
-            QtWidgets.QMessageBox.critical(self, "OpenAI", f"Embedder: {e}")
+            QtWidgets.QMessageBox.critical(self, "OpenAI", str(e))
             return
 
-        gpt_for_hyde = GPTMini(key) if key else None
-        qemb = QueryEmbedder(emb, gpt_for_hyde, use_hyde=use_hyde)
+        gpt_for_hyde = self.get_gptmini(key) if use_hyde else None
 
         self._warm_cache_if_needed(step_each=8000)
+        if self.search_cache is None:
+            QtWidgets.QMessageBox.warning(self, "Поиск", "Кэш не инициализирован. Попробуйте снова после индексации.")
+            return
 
-        qdr = self.search_cache.qdr
-
-        def prefilter(collection: str) -> Tuple[List[str], List]:
-            payload_pts = list(self.search_cache.cache.get(collection, []))
-            if as_of_iso and use_client_pref:
-                try:
-                    cut = dtparser.parse(as_of_iso).date()
-                    def to_date(x):
-                        try:
-                            return dtparser.parse(x).date()
-                        except Exception:
-                            return None
-                    def alive(pl: Dict) -> bool:
-                        ef = to_date(pl.get("effective_from"))
-                        et = to_date(pl.get("effective_to"))
-                        st = (pl.get("status") or "").lower()
-                        if ef and cut < ef:
-                            return False
-                        if et and cut > et:
-                            return False
-                        if "утрат" in st and (not et or cut >= et):
-                            return False
-                        return True
-                    payload_pts = [p for p in payload_pts if alive(p.payload or {})]
-                except Exception as e:
-                    logger.warning(f"as_of parse in prefilter: {e}")
-            ids = keyword_prefilter(payload_pts, qtxt, topk=300) if use_client_pref else []
-            return ids, payload_pts
-
-        ids_a, _ = prefilter(COLL_ARTICLES)
-        ids_c, _ = prefilter(COLL_CHUNKS)
-
-        q_title = list(qemb.embed_title_cached(qtxt))
-        q_body = list(qemb.embed_body_hyde_cached(qtxt))
-
-        def search_ids_rrf(collection, vector_name_title, vector_name_body, qvec_title, qvec_body, ids_prefilter, limit_each, as_of_iso):
-            ranks_title: Dict[str, int] = {}
-            ranks_body: Dict[str, int] = {}
-            filters = make_asof_filters_strict(as_of_iso)
-
-            def _list(val):
-                return list(val) if val else []
-
-            def combine_filters(base: Optional[qm.Filter], extra: Optional[qm.Filter]) -> Optional[qm.Filter]:
-                if not base and not extra:
-                    return None
-                if not base:
-                    return extra
-                if not extra:
-                    return base
-                return qm.Filter(
-                    must=_list(base.must) + _list(extra.must),
-                    should=_list(base.should) + _list(extra.should),
-                    must_not=_list(base.must_not) + _list(extra.must_not),
-                )
-
-            def _call_search(vector_name: str, vector_payload: List[float], flt: Optional[qm.Filter]) -> List[Any]:
-                attempts = [
-                    {"query_vector": (vector_name, vector_payload)},
-                    {"query_vector": {"name": vector_name, "vector": vector_payload}},
-                ]
-                results: List[Any] = []
-                for base in attempts:
-                    for filter_key in ("query_filter", "filter"):
-                        kwargs = dict(
-                            collection_name=collection,
-                            limit=limit_each,
-                            with_payload=False,
-                            with_vectors=False,
-                        )
-                        kwargs.update(base)
-                        if flt is not None:
-                            kwargs[filter_key] = flt
-                        try:
-                            res = qdr.client.search(**kwargs)
-                        except TypeError:
-                            continue
-                        else:
-                            if res:
-                                results.extend(res)
-                            return results
-                return results
-
-            def run_one(using_name: str, qvec: List[float]) -> List[str]:
-                out_ids: List[str] = []
-                base_filter = qm.Filter(must=[qm.HasIdCondition(has_id=ids_prefilter)]) if ids_prefilter else None
-                for flt in filters:
-                    merged = combine_filters(base_filter, flt)
-                    res = _call_search(using_name, qvec, merged)
-                    if res:
-                        out_ids.extend([str(p.id) for p in res])
-                return list(dict.fromkeys(out_ids))[:limit_each]
-
-            ids_t = run_one(vector_name_title, qvec_title)
-            ids_b = run_one(vector_name_body, qvec_body)
-
-            ranks_title.update({pid: i + 1 for i, pid in enumerate(ids_t)})
-            ranks_body.update({pid: i + 1 for i, pid in enumerate(ids_b)})
-
-            return rrf_scores(ranks_title), rrf_scores(ranks_body)
-
-        limit_each = max(20, k * 3)
-
-        title_rrf_a, body_rrf_a = search_ids_rrf(
-            COLL_ARTICLES, "title_vec", "body_vec", q_title, q_body, ids_a, limit_each, as_of_iso
+        engine = SearchEngine(self.search_cache, emb, gpt_for_hyde)
+        options = SearchOptions(
+            query=qtxt,
+            top_k=k,
+            as_of_iso=as_of_iso,
+            use_hyde=use_hyde,
+            title_weight=w_title,
+            use_client_prefilter=use_client_pref,
         )
-        fused_a = combine_rrf_weighted(title_rrf_a, body_rrf_a, w_title, w_body)
 
-        title_rrf_c, body_rrf_c = search_ids_rrf(
-            COLL_CHUNKS, "title_vec", "body_vec", q_title, q_body, ids_c, limit_each, as_of_iso
-        )
-        fused_c = combine_rrf_weighted(title_rrf_c, body_rrf_c, w_title, w_body)
+        try:
+            outcome = engine.run(options)
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, "Поиск", f"Не удалось выполнить запрос: {e}")
+            return
 
-        fused_all: Dict[str, float] = {}
-        for dct in (fused_a, fused_c):
-            for pid, sc in dct.items():
-                fused_all[pid] = fused_all.get(pid, 0.0) + sc
+        self._last_search_outcome = outcome
 
-        ranked_ids = [pid for pid, _ in sorted(fused_all.items(), key=lambda x: x[1], reverse=True)]
-        id2payload = {}
-        for pid in ranked_ids:
-            p = self.search_cache.id2point.get(pid)
-            if p:
-                id2payload[pid] = p.payload or {}
-        m = re.search(r"ст\.?\s*(\d+(?:\.\d+)*)", qtxt.lower())
-        target_art = m.group(1) if m else None
-        boost_exact_article(fused_all, id2payload, target_art)
-        ranked_ids = [pid for pid, _ in sorted(fused_all.items(), key=lambda x: x[1], reverse=True)]
-
-        def pick_points_from_cache(ids_sorted: List[str]) -> List:
-            out = []
-            for pid in ids_sorted:
-                p = self.search_cache.id2point.get(pid)
-                if p is not None:
-                    out.append(p)
-            return out
-
-        prelim_points = pick_points_from_cache(ranked_ids)[:max(20, k * 4)]
-
-        points = prelim_points[:k]
-
-        follow_articles = []
-        for p in points:
-            refs = (p.payload or {}).get("references") or []
-            for a in refs[:3]:
-                follow_articles.append(a)
-        follow_articles = list(dict.fromkeys(follow_articles))[:5]
-
-        extra_points = []
-        for a in follow_articles:
-            try:
-                extra_points += fetch_by_article(qdr, COLL_ARTICLES, a, limit=1)
-            except Exception as e:
-                logger.warning(f"xref fetch: {e}")
-
-        all_points = points + extra_points
-        final_points = dedup_limit(all_points, k)
-
-        out = [
+        # Сформируем вывод
+        self._last_rag_blocks = []
+        out: List[str] = [
             "<style>",
             "body {background:transparent;color:#e2e8f0;font-family:'Inter','Segoe UI',sans-serif;}",
+            ".search-meta {color:#94a3b8;font-size:13px;margin-bottom:12px;line-height:1.4;}",
             ".result-card {background:rgba(15,23,42,0.72);border:1px solid rgba(148,163,184,0.25);border-radius:18px;padding:18px;margin:12px 0;box-shadow:0 18px 36px rgba(15,23,42,0.45);}",
             ".result-card h4 {margin:0 0 8px;font-size:18px;color:#38bdf8;}",
             ".result-meta {display:flex;flex-wrap:wrap;gap:8px;margin-bottom:10px;font-size:12px;color:#cbd5f5;}",
             ".badge {background:rgba(56,189,248,0.15);border:1px solid rgba(56,189,248,0.4);border-radius:999px;padding:2px 10px;}",
+            ".badge-green {background:rgba(74,222,128,0.18);border:1px solid rgba(74,222,128,0.45);}",
             ".result-summary {font-style:italic;color:#f8fafc;margin-bottom:10px;}",
             "pre {background:rgba(15,23,42,0.9);border-radius:12px;padding:12px;white-space:pre-wrap;font-family:'JetBrains Mono','Fira Code',monospace;font-size:13px;color:#e2e8f0;}",
             "</style><h3>Результаты</h3>",
         ]
-        self._last_rag_blocks = []
-        if not final_points:
-            out.append("<i>Пусто.</i>")
+
+        debug_meta = outcome.debug.get("meta", {}) if outcome.debug else {}
+        meta_lines = [
+            f"HyDE: {'включен' if use_hyde else 'выключен'}",
+            f"Вес заголовка: {w_title:.2f}",
+            f"Клиентский префильтр: {'да' if use_client_pref else 'нет'}",
+        ]
+        if as_of_iso:
+            meta_lines.append(f"as-of: {safe_html(as_of_iso)}")
+        if target_article:
+            meta_lines.append(f"Поиск конкретной статьи: № {safe_html(target_article)}")
+        if debug_meta.get("direct_article"):
+            meta_lines.append("Найден прямой матч по номеру статьи")
+        out.append("<div class='search-meta'>" + "<br>".join(meta_lines) + "</div>")
+
+        hits = outcome.hits
+        if not hits:
+            out.append("<i>Пусто — проверьте, что коллекции проиндексированы.</i>")
         else:
-            for p in final_points:
-                pl = p.payload or {}
+            for hit in hits:
+                pl = hit.payload
                 title = pl.get("title") or ""
                 part = pl.get("part") or "—"
                 ch = pl.get("chapter") or "—"
@@ -2643,12 +3213,17 @@ class MainWindow(QtWidgets.QMainWindow):
                 src = pl.get("source") or ""
                 summ = pl.get("semantic_summary") or ""
                 snippet = safe_html((pl.get("text") or "")[:900])
+                badges = [
+                    f"<span class='badge'>Часть: {safe_html(str(part))}</span>",
+                    f"<span class='badge'>Глава: {safe_html(str(ch))}</span>",
+                    f"<span class='badge'>Статья: {safe_html(str(art))}</span>",
+                ]
+                if target_article and str(art) == target_article:
+                    badges.append("<span class='badge badge-green'>Совпадение с запросом</span>")
                 out.append(
                     "<div class='result-card'>"
                     f"<h4>{safe_html(title)}</h4>"
-                    f"<div class='result-meta'><span class='badge'>Часть: {safe_html(str(part))}</span>"
-                    f"<span class='badge'>Глава: {safe_html(str(ch))}</span>"
-                    f"<span class='badge'>Статья: {safe_html(str(art))}</span></div>"
+                    f"<div class='result-meta'>{''.join(badges)}</div>"
                     f"<div class='result-summary'>{safe_html(summ)}</div>"
                     f"<div style='font-size:12px;color:#94a3b8;margin-bottom:8px;'>{safe_html(anchor)} · {safe_html(src)}</div>"
                     f"<pre>{snippet}…</pre>"
@@ -2659,7 +3234,11 @@ class MainWindow(QtWidgets.QMainWindow):
             out.append("<h4>Контекст для GPT</h4>")
             sep = "\n\n---\n\n"
             joined_ctx = sep.join(self._last_rag_blocks)
-            out.append("<pre style='white-space:pre-wrap;font-family:inherit;background:rgba(15,23,42,0.85);border-radius:12px;padding:14px;'>" + safe_html(joined_ctx) + "</pre>")
+            out.append(
+                "<pre style='white-space:pre-wrap;font-family:inherit;background:rgba(15,23,42,0.85);border-radius:12px;padding:14px;'>"
+                + safe_html(joined_ctx)
+                + "</pre>"
+            )
 
         self.results.setHtml("\n".join(out))
 
