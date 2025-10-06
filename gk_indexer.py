@@ -2529,25 +2529,55 @@ class MainWindow(QtWidgets.QMainWindow):
             ranks_body: Dict[str, int] = {}
             filters = make_asof_filters_strict(as_of_iso)
 
+            def _list(val):
+                return list(val) if val else []
+
+            def combine_filters(base: Optional[qm.Filter], extra: Optional[qm.Filter]) -> Optional[qm.Filter]:
+                if not base and not extra:
+                    return None
+                if not base:
+                    return extra
+                if not extra:
+                    return base
+                return qm.Filter(
+                    must=_list(base.must) + _list(extra.must),
+                    should=_list(base.should) + _list(extra.should),
+                    must_not=_list(base.must_not) + _list(extra.must_not),
+                )
+
+            def _call_search(vector_name: str, vector_payload: List[float], flt: Optional[qm.Filter]) -> List[Any]:
+                attempts = [
+                    {"query_vector": (vector_name, vector_payload)},
+                    {"query_vector": {"name": vector_name, "vector": vector_payload}},
+                ]
+                results: List[Any] = []
+                for base in attempts:
+                    for filter_key in ("query_filter", "filter"):
+                        kwargs = dict(
+                            collection_name=collection,
+                            limit=limit_each,
+                            with_payload=False,
+                            with_vectors=False,
+                        )
+                        kwargs.update(base)
+                        if flt is not None:
+                            kwargs[filter_key] = flt
+                        try:
+                            res = qdr.client.search(**kwargs)
+                        except TypeError:
+                            continue
+                        else:
+                            if res:
+                                results.extend(res)
+                            return results
+                return results
+
             def run_one(using_name: str, qvec: List[float]) -> List[str]:
                 out_ids: List[str] = []
+                base_filter = qm.Filter(must=[qm.HasIdCondition(has_id=ids_prefilter)]) if ids_prefilter else None
                 for flt in filters:
-                    base_filter = qm.Filter(must=[qm.HasIdCondition(has_id=ids_prefilter)]) if ids_prefilter else None
-                    if flt and base_filter:
-                        qf = qm.Filter(must=(base_filter.must + flt.must), should=(flt.should or []))
-                    else:
-                        qf = base_filter or flt
-                    res = qdr.client.query_points(
-                        collection_name=collection,
-                        query=qm.NamedQuery(
-                            name=using_name,
-                            vector=qvec,
-                            limit=limit_each,
-                            filter=qf,
-                        ),
-                        with_payload=False,
-                        with_vectors=False,
-                    )
+                    merged = combine_filters(base_filter, flt)
+                    res = _call_search(using_name, qvec, merged)
                     if res:
                         out_ids.extend([str(p.id) for p in res])
                 return list(dict.fromkeys(out_ids))[:limit_each]
