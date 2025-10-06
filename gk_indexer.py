@@ -28,7 +28,7 @@ import importlib
 import logging
 from logging.handlers import TimedRotatingFileHandler
 from dataclasses import dataclass, asdict
-from typing import List, Optional, Tuple, Dict
+from typing import List, Optional, Tuple, Dict, Any
 from datetime import datetime
 
 # ---- Qt ----
@@ -155,6 +155,44 @@ def extract_keywords(text: str, topn=8) -> List[str]:
         if w in stop: continue
         freq[w] = freq.get(w, 0) + 1
     return sorted(freq, key=freq.get, reverse=True)[:topn]
+
+
+def analyze_text_content(text: str) -> Dict[str, Any]:
+    """Вычисляет ключевые метрики для документа, чтобы подсказать пользователю,
+    насколько текст готов к векторизации."""
+    clean = norm_text(text)
+    length_chars = len(clean)
+    words = re.findall(r"[А-Яа-яA-Za-z]{2,}", clean)
+    word_count = len(words)
+    unique_words = len(set(w.lower() for w in words))
+    paragraphs = [p for p in clean.split("\n") if p.strip()]
+    para_count = len(paragraphs)
+    avg_para_len = round(word_count / max(1, para_count), 1)
+    references = extract_references(clean)
+    keywords = extract_keywords(clean, topn=10)
+    rough_tokens_val = CorpusBuilder.rough_tokens(clean) if word_count else 0
+
+    warnings: List[str] = []
+    if rough_tokens_val > MAX_EMB_TOKENS:
+        warnings.append(
+            f"Текст превышает безопасный лимит токенов ({rough_tokens_val}>{MAX_EMB_TOKENS})."
+        )
+    if para_count < 3:
+        warnings.append("Мало абзацев — возможно, потребуется ручная разбивка.")
+    if not references:
+        warnings.append("Не обнаружены ссылки на статьи — проверьте корректность исходника.")
+
+    return {
+        "length_chars": length_chars,
+        "word_count": word_count,
+        "unique_words": unique_words,
+        "paragraphs": para_count,
+        "avg_paragraph_words": avg_para_len,
+        "rough_tokens": rough_tokens_val,
+        "references": references,
+        "keywords": keywords,
+        "warnings": warnings,
+    }
 
 
 def make_summary(text: str) -> str:
@@ -1036,13 +1074,17 @@ class QueryEmbedder:
 class MainWindow(QtWidgets.QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("ГК РФ — Индексатор v3.7 (named-vectors + HyDE + GPT rerank + stream + gpt-5-nano enrich)")
-        self.resize(1380, 980)
+        self.setWindowTitle("ГК РФ — Индексатор v3.8 · Vector Studio")
+        self.resize(1420, 980)
+
+        self.apply_modern_style()
 
         self.selected_files: List[str] = []
         self.chunks: List[LawDoc] = []
         self.articles: List[LawDoc] = []
+        self.analysis_per_file: Dict[str, Dict[str, Any]] = {}
         self.search_cache: Optional[SearchCache] = None
+        self._last_vector: Optional[List[float]] = None
 
         self.tabs = QtWidgets.QTabWidget()
         self.setCentralWidget(self.tabs)
@@ -1051,15 +1093,18 @@ class MainWindow(QtWidgets.QMainWindow):
         self.tab_index  = QtWidgets.QWidget()
         self.tab_search = QtWidgets.QWidget()
         self.tab_tests  = QtWidgets.QWidget()
+        self.tab_vectors = QtWidgets.QWidget()
         self.tabs.addTab(self.tab_import, "Импорт")
         self.tabs.addTab(self.tab_index,  "Индексация")
         self.tabs.addTab(self.tab_search, "Поиск")
         self.tabs.addTab(self.tab_tests,  "Тесты")
+        self.tabs.addTab(self.tab_vectors, "Vector Lab")
 
         self.setup_import_tab()
         self.setup_index_tab()
         self.setup_search_tab()
         self.setup_tests_tab()
+        self.setup_vector_lab_tab()
 
         self.log_box = QtWidgets.QPlainTextEdit(); self.log_box.setReadOnly(True)
         self.tabs.addTab(self.log_box, "Лог")
@@ -1071,24 +1116,148 @@ class MainWindow(QtWidgets.QMainWindow):
         self.status.addWidget(self.cache_progress_lbl)
 
     # ---------- Utils ----------
+    def apply_modern_style(self):
+        palette = self.palette()
+        base_color = QtGui.QColor(36, 41, 47)
+        accent = QtGui.QColor(10, 132, 255)
+        text_color = QtGui.QColor(240, 240, 240)
+        panel = QtGui.QColor(46, 52, 60)
+        palette.setColor(QtGui.QPalette.Window, base_color)
+        palette.setColor(QtGui.QPalette.WindowText, text_color)
+        palette.setColor(QtGui.QPalette.Base, QtGui.QColor(30, 33, 40))
+        palette.setColor(QtGui.QPalette.AlternateBase, QtGui.QColor(40, 44, 52))
+        palette.setColor(QtGui.QPalette.ToolTipBase, text_color)
+        palette.setColor(QtGui.QPalette.ToolTipText, QtGui.QColor(20, 20, 20))
+        palette.setColor(QtGui.QPalette.Text, text_color)
+        palette.setColor(QtGui.QPalette.Button, panel)
+        palette.setColor(QtGui.QPalette.ButtonText, text_color)
+        palette.setColor(QtGui.QPalette.Highlight, accent)
+        palette.setColor(QtGui.QPalette.HighlightedText, QtGui.QColor(255, 255, 255))
+        self.setPalette(palette)
+        font = self.font()
+        font.setPointSize(11)
+        self.setFont(font)
+        self.setStyleSheet("""
+            QWidget { color: #f0f0f0; }
+            QTabWidget::pane { border: 1px solid #1f232a; background:#1f232a; }
+            QPushButton {
+                background-color: #0a84ff;
+                color: #ffffff;
+                border-radius: 6px;
+                padding: 6px 12px;
+            }
+            QPushButton:disabled { background-color: #3a3f47; color: #888; }
+            QPushButton:hover { background-color: #479dff; }
+            QLineEdit, QPlainTextEdit, QTextEdit, QComboBox, QSpinBox, QDateEdit, QDoubleSpinBox {
+                background-color: #242933;
+                border: 1px solid #343b45;
+                border-radius: 6px;
+                padding: 6px;
+            }
+            QListWidget, QTableWidget, QTextBrowser {
+                background-color: #1f232a;
+                border: 1px solid #343b45;
+                border-radius: 6px;
+            }
+            QProgressBar {
+                border: 1px solid #343b45;
+                border-radius: 6px;
+                text-align: center;
+                background: #1f232a;
+            }
+            QProgressBar::chunk { background-color: #0a84ff; border-radius: 6px; }
+        """)
+
     def log(self, msg: str):
         ts = datetime.now().strftime("%H:%M:%S")
         self.log_box.appendPlainText(f"[{ts}] {msg}")
         logger.info(msg)
 
+    def update_analysis_view(self, path: str):
+        data = self.analysis_per_file.get(path)
+        if not data:
+            self.analysis_table.setRowCount(0)
+            self.analysis_summary.setText("Аналитика недоступна для выбранного документа.")
+            return
+        metrics = [
+            ("Символов", str(data.get("length_chars", 0))),
+            ("Слов", str(data.get("word_count", 0))),
+            ("Уникальных слов", str(data.get("unique_words", 0))),
+            ("Абзацев", str(data.get("paragraphs", 0))),
+            ("Средний размер абзаца", str(data.get("avg_paragraph_words", 0))),
+            ("Оценка токенов", str(data.get("rough_tokens", 0))),
+            ("Найденные ссылки", ", ".join(data.get("references", [])[:10]) or "—"),
+            ("Ключевые слова", ", ".join(data.get("keywords", [])) or "—"),
+        ]
+        self.analysis_table.setRowCount(len(metrics))
+        for row, (name, value) in enumerate(metrics):
+            self.analysis_table.setItem(row, 0, QtWidgets.QTableWidgetItem(name))
+            self.analysis_table.setItem(row, 1, QtWidgets.QTableWidgetItem(value))
+        warnings = data.get("warnings", [])
+        if warnings:
+            txt = "\n".join(f"⚠️ {w}" for w in warnings)
+        else:
+            txt = "Документ выглядит готовым к векторизации."
+        if data.get("keywords"):
+            txt += "\n\nТоп ключевых слов: " + ", ".join(data.get("keywords"))
+        self.analysis_summary.setText(txt)
+
     # ---------- Import ----------
     def setup_import_tab(self):
         lay = QtWidgets.QVBoxLayout(self.tab_import)
 
-        row = QtWidgets.QHBoxLayout()
-        self.btn_add = QtWidgets.QPushButton("Добавить файлы…"); self.btn_add.clicked.connect(self.add_files)
-        self.btn_clear = QtWidgets.QPushButton("Очистить"); self.btn_clear.clicked.connect(self.clear_files)
-        row.addWidget(self.btn_add); row.addWidget(self.btn_clear)
+        header = QtWidgets.QHBoxLayout()
+        self.btn_add = QtWidgets.QPushButton("Добавить источники…"); self.btn_add.clicked.connect(self.add_files)
+        self.btn_clear = QtWidgets.QPushButton("Очистить список"); self.btn_clear.clicked.connect(self.clear_files)
+        self.btn_parse = QtWidgets.QPushButton("Подготовить корпус")
+        self.btn_parse.clicked.connect(self.parse_and_chunk)
+        header.addWidget(self.btn_add)
+        header.addWidget(self.btn_clear)
+        header.addStretch(1)
+        header.addWidget(self.btn_parse)
 
+        splitter = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
+
+        left_widget = QtWidgets.QWidget()
+        left_layout = QtWidgets.QVBoxLayout(left_widget)
+        lbl_files = QtWidgets.QLabel("Выбранные документы")
+        lbl_files.setStyleSheet("font-weight:600;margin-bottom:4px;")
         self.files_list = QtWidgets.QListWidget()
         self.files_list.currentItemChanged.connect(self.on_current_file_changed)
+        left_layout.addWidget(lbl_files)
+        left_layout.addWidget(self.files_list)
 
-        form = QtWidgets.QFormLayout()
+        right_widget = QtWidgets.QWidget()
+        right_layout = QtWidgets.QVBoxLayout(right_widget)
+
+        self.preview = QtWidgets.QPlainTextEdit()
+        self.preview.setPlaceholderText("Предпросмотр текста…")
+        self.preview.setMaximumBlockCount(5000)
+        self.preview.setReadOnly(True)
+
+        self.analysis_table = QtWidgets.QTableWidget(0, 2)
+        self.analysis_table.setHorizontalHeaderLabels(["Метрика", "Значение"])
+        self.analysis_table.horizontalHeader().setStretchLastSection(True)
+        self.analysis_table.setSelectionMode(QtWidgets.QAbstractItemView.NoSelection)
+        self.analysis_table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
+
+        self.analysis_summary = QtWidgets.QTextBrowser()
+        self.analysis_summary.setPlaceholderText("Здесь появятся инсайты по выбранному документу.")
+
+        right_layout.addWidget(QtWidgets.QLabel("Аналитика документа"))
+        right_layout.addWidget(self.analysis_table, 1)
+        right_layout.addWidget(QtWidgets.QLabel("Предупреждения / рекомендации"))
+        right_layout.addWidget(self.analysis_summary, 1)
+        right_layout.addWidget(QtWidgets.QLabel("Фрагмент исходного текста"))
+        right_layout.addWidget(self.preview, 2)
+
+        splitter.addWidget(left_widget)
+        splitter.addWidget(right_widget)
+        splitter.setStretchFactor(0, 1)
+        splitter.setStretchFactor(1, 2)
+
+        form_box = QtWidgets.QGroupBox("Параметры корпуса")
+        form = QtWidgets.QFormLayout(form_box)
         self.ed_code  = QtWidgets.QLineEdit("ГК РФ")
         self.ed_title = QtWidgets.QLineEdit("Гражданский кодекс Российской Федерации")
         self.spin_chunk   = QtWidgets.QSpinBox(); self.spin_chunk.setRange(200, 4000); self.spin_chunk.setValue(800)
@@ -1102,24 +1271,17 @@ class MainWindow(QtWidgets.QMainWindow):
 
         form.addRow("Кодекс:", self.ed_code)
         form.addRow("Заголовок:", self.ed_title)
-        form.addRow("Чанк (токены≈):", self.spin_chunk)
+        form.addRow("Размер чанка (токенов≈):", self.spin_chunk)
         form.addRow("Оверлап:", self.spin_overlap)
         form.addRow(self.chk_gpt_summ)
         form.addRow(self.chk_summ_articles_only)
-        form.addRow("Effective from:", self.eff_from)
-        form.addRow("Effective to:", self.eff_to)
-        form.addRow("Status:", self.eff_status)
+        form.addRow("Действует с:", self.eff_from)
+        form.addRow("Действует по:", self.eff_to)
+        form.addRow("Статус нормы:", self.eff_status)
 
-        self.btn_parse = QtWidgets.QPushButton("Парсить → Чанки и Статьи")
-        self.btn_parse.clicked.connect(self.parse_and_chunk)
-
-        self.preview = QtWidgets.QPlainTextEdit(); self.preview.setPlaceholderText("Предпросмотр текста…")
-
-        lay.addLayout(row)
-        lay.addWidget(self.files_list)
-        lay.addLayout(form)
-        lay.addWidget(self.btn_parse)
-        lay.addWidget(self.preview)
+        lay.addLayout(header)
+        lay.addWidget(form_box)
+        lay.addWidget(splitter, 1)
 
     def add_files(self):
         files, _ = QtWidgets.QFileDialog.getOpenFileNames(self, "Документы", "", "Документы (*.rtf *.pdf *.docx *.txt)")
@@ -1128,19 +1290,30 @@ class MainWindow(QtWidgets.QMainWindow):
             self.selected_files.append(f)
             self.files_list.addItem(f)
         self.log(f"Добавлено файлов: {len(files)}")
+        if self.files_list.count() and not self.files_list.currentItem():
+            self.files_list.setCurrentRow(0)
 
     def clear_files(self):
         self.selected_files.clear()
         self.files_list.clear()
         self.chunks, self.articles = [], []
+        self.analysis_per_file.clear()
+        self.analysis_table.setRowCount(0)
+        self.analysis_summary.clear()
+        self.preview.clear()
 
     def on_current_file_changed(self, cur, prev):
         if not cur: return
         path = cur.text()
         try:
-            self.preview.setPlainText(extract_text_from_file(path)[:25000])
+            text = extract_text_from_file(path)
+            self.preview.setPlainText(text[:25000])
+            if path not in self.analysis_per_file:
+                self.analysis_per_file[path] = analyze_text_content(text)
+            self.update_analysis_view(path)
         except Exception as e:
             self.preview.setPlainText(f"Ошибка предпросмотра: {e}")
+            self.analysis_summary.setText(f"Не удалось проанализировать документ: {e}")
 
     def parse_and_chunk(self):
         if not self.selected_files:
@@ -1160,6 +1333,7 @@ class MainWindow(QtWidgets.QMainWindow):
         for path in self.selected_files:
             try:
                 raw = extract_text_from_file(path)
+                self.analysis_per_file[path] = analyze_text_content(raw)
                 part = auto_detect_part(path)
                 chunks, arts = builder.prepare_docs(
                     full_text=raw, code_name=code, part_name=part, title=title, source_path=path,
@@ -1168,6 +1342,12 @@ class MainWindow(QtWidgets.QMainWindow):
                 all_chunks.extend(chunks); all_articles.extend(arts)
                 tot_c += len(chunks); tot_a += len(arts)
                 self.log(f"OK: {os.path.basename(path)} → статей: {len(arts)}; чанков: {len(chunks)}")
+                warnings = self.analysis_per_file[path].get("warnings", [])
+                if warnings:
+                    for w in warnings:
+                        self.log(f"   ⚠️ {w}")
+                if self.files_list.currentItem() and self.files_list.currentItem().text() == path:
+                    self.update_analysis_view(path)
             except Exception as e:
                 self.log(f"Ошибка парсинга {path}: {e}")
         if self.chk_gpt_summ.isChecked():
@@ -1613,7 +1793,17 @@ class MainWindow(QtWidgets.QMainWindow):
         all_points = points + extra_points
         final_points = dedup_limit(all_points, k)
 
-        out = ["<h3>Результаты</h3>"]
+        out = [
+            "<style>"
+            "body {background:#1f232a;color:#f0f0f0;}"
+            ".result-card {background:linear-gradient(135deg,#1f252f,#232b36);border:1px solid #2f3742;border-radius:12px;padding:16px;margin:12px 0;box-shadow:0 8px 24px rgba(0,0,0,0.25);}"
+            ".result-card h4 {margin:0 0 8px 0;font-size:18px;color:#4ea0ff;}"
+            ".result-meta {display:flex;gap:12px;font-size:13px;color:#9aa8b5;margin-bottom:8px;}"
+            ".result-summary {font-style:italic;color:#d7dde4;margin-bottom:8px;}"
+            ".badge {background:#0a84ff33;color:#9bc9ff;border:1px solid #0a84ff55;padding:2px 8px;border-radius:999px;font-size:12px;}"
+            "pre {background:#15181f;border-radius:8px;padding:12px;white-space:pre-wrap;font-family:'Fira Code',monospace;font-size:13px;color:#dce2ec;}"
+            "</style><h3>Результаты</h3>"
+        ]
         self._last_rag_blocks = []
         if not final_points:
             out.append("<i>Пусто.</i>")
@@ -1629,12 +1819,14 @@ class MainWindow(QtWidgets.QMainWindow):
                 summ   = pl.get("semantic_summary") or ""
                 snippet = safe_html((pl.get("text") or "")[:900])
                 out.append(
-                    "<div style='margin:10px 0;padding:10px;border:1px solid #ddd;border-radius:8px'>"
-                    f"<b>{safe_html(title)}</b><br>"
-                    f"Часть: {safe_html(str(part))}; Глава: {safe_html(str(ch))}; Статья: {safe_html(str(art))}<br>"
-                    f"<small>{safe_html(anchor)} | Источник: {safe_html(src)}</small><br>"
-                    f"<i>{safe_html(summ)}</i>"
-                    f"<pre style='white-space:pre-wrap;font-family:inherit'>{snippet}…</pre>"
+                    "<div class='result-card'>"
+                    f"<h4>{safe_html(title)}</h4>"
+                    f"<div class='result-meta'><span class='badge'>Часть: {safe_html(str(part))}</span>"
+                    f"<span class='badge'>Глава: {safe_html(str(ch))}</span>"
+                    f"<span class='badge'>Статья: {safe_html(str(art))}</span></div>"
+                    f"<div class='result-summary'>{safe_html(summ)}</div>"
+                    f"<div style='font-size:12px;color:#8e9aad;margin-bottom:8px;'>{safe_html(anchor)} · {safe_html(src)}</div>"
+                    f"<pre>{snippet}…</pre>"
                     "</div>"
                 )
                 self._last_rag_blocks.append(pl.get("formatted_text") or pl.get("text",""))
@@ -1675,6 +1867,78 @@ class MainWindow(QtWidgets.QMainWindow):
         lay.addLayout(row)
         lay.addWidget(self.test_out)
 
+    # ---------- Vector Lab ----------
+    def setup_vector_lab_tab(self):
+        lay = QtWidgets.QVBoxLayout(self.tab_vectors)
+
+        intro = QtWidgets.QLabel(
+            "Vector Lab помогает быстро проверять эмбеддинги, исследовать коллекции Qdrant и сверять сходство документов."
+        )
+        intro.setWordWrap(True)
+
+        lay.addWidget(intro)
+
+        splitter = QtWidgets.QSplitter(QtCore.Qt.Vertical)
+
+        # --- верхняя часть: подготовка эмбеддинга ---
+        top_widget = QtWidgets.QWidget()
+        top_layout = QtWidgets.QVBoxLayout(top_widget)
+        top_layout.addWidget(QtWidgets.QLabel("Текст для анализа"))
+        self.vlab_input = QtWidgets.QPlainTextEdit()
+        self.vlab_input.setPlaceholderText("Вставьте фрагмент нормы или пользовательский запрос…")
+        top_layout.addWidget(self.vlab_input)
+
+        controls = QtWidgets.QHBoxLayout()
+        self.btn_vlab_embed = QtWidgets.QPushButton("Получить эмбеддинг")
+        self.btn_vlab_embed.clicked.connect(self.run_vector_probe)
+        self.btn_vlab_copy = QtWidgets.QPushButton("Копировать в буфер")
+        self.btn_vlab_copy.clicked.connect(self.copy_vector_to_clipboard)
+        controls.addWidget(self.btn_vlab_embed)
+        controls.addWidget(self.btn_vlab_copy)
+        controls.addStretch(1)
+        top_layout.addLayout(controls)
+
+        self.vlab_info = QtWidgets.QTextBrowser()
+        self.vlab_info.setPlaceholderText("Результаты по эмбеддингу и диагностике появятся здесь.")
+        top_layout.addWidget(self.vlab_info)
+
+        splitter.addWidget(top_widget)
+
+        # --- нижняя часть: поиск по коллекции ---
+        bottom_widget = QtWidgets.QWidget()
+        bottom_layout = QtWidgets.QVBoxLayout(bottom_widget)
+        controls2 = QtWidgets.QHBoxLayout()
+        self.vlab_collection = QtWidgets.QComboBox()
+        self.vlab_vector_type = QtWidgets.QComboBox(); self.vlab_vector_type.addItems(["title_vec", "body_vec"])
+        self.vlab_limit = QtWidgets.QSpinBox(); self.vlab_limit.setRange(1, 50); self.vlab_limit.setValue(10)
+        self.btn_vlab_refresh = QtWidgets.QPushButton("Обновить списки коллекций")
+        self.btn_vlab_refresh.clicked.connect(self.refresh_vector_lab_collections)
+        self.btn_vlab_search = QtWidgets.QPushButton("Запуск поиска")
+        self.btn_vlab_search.clicked.connect(self.run_vector_probe)
+        controls2.addWidget(QtWidgets.QLabel("Коллекция:"))
+        controls2.addWidget(self.vlab_collection, 1)
+        controls2.addWidget(QtWidgets.QLabel("Вектор:"))
+        controls2.addWidget(self.vlab_vector_type)
+        controls2.addWidget(QtWidgets.QLabel("Top-N:"))
+        controls2.addWidget(self.vlab_limit)
+        controls2.addWidget(self.btn_vlab_refresh)
+        controls2.addWidget(self.btn_vlab_search)
+        bottom_layout.addLayout(controls2)
+
+        self.vlab_results = QtWidgets.QTableWidget(0, 5)
+        self.vlab_results.setHorizontalHeaderLabels(["Score", "ID", "Статья", "Глава", "Фрагмент"])
+        self.vlab_results.horizontalHeader().setStretchLastSection(True)
+        self.vlab_results.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
+        self.vlab_results.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
+        bottom_layout.addWidget(self.vlab_results)
+
+        splitter.addWidget(bottom_widget)
+        splitter.setStretchFactor(0, 1)
+        splitter.setStretchFactor(1, 1)
+
+        lay.addWidget(splitter)
+        self.refresh_vector_lab_collections()
+
     def run_one_test(self):
         item = self.tests.currentItem()
         if not item: return
@@ -1688,6 +1952,111 @@ class MainWindow(QtWidgets.QMainWindow):
         self.ed_query.setText(qtxt)
         self.do_search()
         self.test_out.append(f"✓ Тест выполнен: {qtxt}")
+
+    def refresh_vector_lab_collections(self):
+        try:
+            qdr = QdrantIndex(QDRANT_PATH)
+            cols = qdr.client.get_collections().collections or []
+            names = [c.name for c in cols]
+        except Exception as e:
+            self.vlab_collection.clear()
+            self.vlab_collection.addItem("Нет подключения")
+            self.vlab_collection.setEnabled(False)
+            self.vlab_results.setRowCount(0)
+            self.vlab_info.setText(f"Не удалось получить список коллекций: {e}")
+            return
+        self.vlab_collection.setEnabled(True)
+        self.vlab_collection.clear()
+        if not names:
+            self.vlab_collection.addItem("Коллекции отсутствуют")
+            self.vlab_collection.setEnabled(False)
+        else:
+            self.vlab_collection.addItems(names)
+
+    def copy_vector_to_clipboard(self):
+        if not self._last_vector:
+            QtWidgets.QMessageBox.information(self, "Vector Lab", "Сначала сгенерируйте эмбеддинг.")
+            return
+        cb = QtWidgets.QApplication.clipboard()
+        cb.setText(json.dumps(self._last_vector)[:15000])
+        self.log("Вектор сохранён в буфер обмена.")
+
+    def run_vector_probe(self):
+        text = self.vlab_input.toPlainText().strip()
+        key = self.ed_api_key.text().strip() or os.environ.get("OPENAI_API_KEY") or OPENAI_API_KEY_DEFAULT
+        if not key:
+            QtWidgets.QMessageBox.warning(self, "Vector Lab", "Укажите OpenAI API Key на вкладке 'Индексация'.")
+            return
+        vector: Optional[List[float]] = None
+        info_chunks: List[str] = []
+        try:
+            emb = Embedder(key)
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, "Vector Lab", f"Не удалось создать Embedder: {e}")
+            return
+
+        if text:
+            try:
+                vector = emb.embed_one(text)
+                self._last_vector = vector
+                info = analyze_text_content(text)
+                info_chunks.append(
+                    "\n".join([
+                        f"Размер эмбеддинга: {len(vector)}",
+                        f"Оценка токенов: {info.get('rough_tokens')}",
+                        f"Ключевые слова: {', '.join(info.get('keywords', [])) or '—'}",
+                        f"Найденные ссылки: {', '.join(info.get('references', [])) or '—'}"
+                    ])
+                )
+                if info.get("warnings"):
+                    info_chunks.append("Предупреждения:\n" + "\n".join(f"• {w}" for w in info["warnings"]))
+            except Exception as e:
+                QtWidgets.QMessageBox.critical(self, "Vector Lab", f"Ошибка генерации эмбеддинга: {e}")
+                return
+        else:
+            vector = self._last_vector
+
+        if vector is None:
+            QtWidgets.QMessageBox.information(self, "Vector Lab", "Введите текст или используйте ранее вычисленный вектор.")
+            return
+
+        if info_chunks:
+            self.vlab_info.setText("\n\n".join(info_chunks))
+        else:
+            self.vlab_info.clear()
+
+        collection = self.vlab_collection.currentText()
+        if not collection or not self.vlab_collection.isEnabled():
+            return
+
+        try:
+            qdr = QdrantIndex(QDRANT_PATH)
+            named = self.vlab_vector_type.currentText()
+            limit = int(self.vlab_limit.value())
+            res = qdr.client.query_points(
+                collection_name=collection,
+                query=qm.NamedQuery(name=named, vector=vector, limit=limit),
+                with_payload=True,
+                with_vectors=False
+            )
+        except Exception as e:
+            self.vlab_results.setRowCount(0)
+            self.vlab_info.append(f"\nПоиск не выполнен: {e}")
+            return
+
+        self.vlab_results.setRowCount(len(res))
+        for row, point in enumerate(res):
+            payload = point.payload or {}
+            score = getattr(point, "score", None)
+            if score is None:
+                score = payload.get("score", 0.0)
+            self.vlab_results.setItem(row, 0, QtWidgets.QTableWidgetItem(f"{score:.4f}"))
+            self.vlab_results.setItem(row, 1, QtWidgets.QTableWidgetItem(str(getattr(point, "id", ""))))
+            self.vlab_results.setItem(row, 2, QtWidgets.QTableWidgetItem(str(payload.get("article", "—"))))
+            self.vlab_results.setItem(row, 3, QtWidgets.QTableWidgetItem(str(payload.get("chapter", "—"))))
+            snippet = (payload.get("semantic_summary") or payload.get("text") or "")[:160]
+            self.vlab_results.setItem(row, 4, QtWidgets.QTableWidgetItem(snippet))
+
 
 # ============================
 # CLI (headless) режим
