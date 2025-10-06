@@ -6,7 +6,7 @@
 - Подсказки и пояснения к каждой настройке: от импорта до поиска и Vector Lab.
 - Расширенный анализ исходных документов, визуальные карточки результатов и Vector Lab для экспериментов.
 - Stream upsert (батчами) без роста RAM; кэш эмбеддингов (SQLite).
-- Переключатели HyDE и GPT-rerank; адаптивный вес title для «ст. NNN».
+- Переключатель HyDE; адаптивный вес title для «ст. NNN».
 - Ленивая прогревка кэша + индикатор; кнопка «Очистить кэш».
 - Квантизация (int8) — опционально; по умолчанию OFF ради точности.
 - Строгий as-of (двойной OR-фильтр) сохранён; клиентский префильтр опционален.
@@ -102,7 +102,7 @@ APP_STYLESHEET = """
     font-size: 14px;
 }
 QWidget {
-    background-color: #0f172a;
+    background-color: #0b1120;
     color: #e2e8f0;
 }
 QScrollArea {
@@ -110,17 +110,17 @@ QScrollArea {
     border: none;
 }
 QLabel#Headline {
-    font-size: 28px;
+    font-size: 30px;
     font-weight: 700;
-    letter-spacing: 0.4px;
-    padding-bottom: 12px;
+    letter-spacing: 0.5px;
+    padding-bottom: 10px;
 }
 QLabel#SubHeadline {
     font-size: 16px;
-    color: #9ca3af;
+    color: #94a3b8;
 }
 QLabel#SectionTitle {
-    font-size: 18px;
+    font-size: 19px;
     font-weight: 600;
     color: #f8fafc;
     margin-bottom: 8px;
@@ -130,75 +130,95 @@ QLabel#OptionLabel {
     color: #f1f5f9;
 }
 QLabel#OptionHint {
-    color: #94a3b8;
-    line-height: 1.4em;
+    color: #9ca3af;
+    line-height: 1.45em;
 }
 QFrame#Card {
-    background-color: rgba(15, 23, 42, 0.6);
-    border: 1px solid rgba(148, 163, 184, 0.16);
-    border-radius: 14px;
-    padding: 16px;
+    background-color: rgba(15, 23, 42, 0.68);
+    border: 1px solid rgba(148, 163, 184, 0.18);
+    border-radius: 16px;
+    padding: 20px;
 }
 QFrame#HeroCard {
     background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
-        stop:0 #1e3a8a,
+        stop:0 #1d4ed8,
         stop:1 #0ea5e9);
+    border-radius: 22px;
+    padding: 26px;
+    color: #f8fafc;
+}
+QListWidget#NavigationList {
+    background-color: rgba(15, 23, 42, 0.55);
+    border: 1px solid rgba(148, 163, 184, 0.18);
     border-radius: 18px;
-    padding: 22px;
+    padding: 12px;
+}
+QListWidget#NavigationList::item {
+    margin: 4px 2px;
+    padding: 12px 14px;
+    border-radius: 12px;
+}
+QListWidget#NavigationList::item:selected {
+    background-color: rgba(59, 130, 246, 0.25);
     color: #f8fafc;
 }
 QPushButton {
-    background-color: #2563eb;
-    border-radius: 10px;
-    padding: 9px 16px;
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+        stop:0 #2563eb,
+        stop:1 #1d4ed8);
+    border-radius: 12px;
+    padding: 10px 18px;
     font-weight: 600;
+    color: #f8fafc;
+    border: none;
 }
 QPushButton:hover {
-    background-color: #3b82f6;
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+        stop:0 #3b82f6,
+        stop:1 #2563eb);
 }
 QPushButton:disabled {
     background-color: #1e293b;
     color: #64748b;
 }
 QLineEdit, QPlainTextEdit, QTextEdit, QComboBox, QSpinBox,
-QDoubleSpinBox, QDateEdit, QListWidget, QTableWidget, QTextBrowser {
-    background-color: rgba(15, 23, 42, 0.8);
+QDoubleSpinBox, QDateEdit {
+    background-color: rgba(15, 23, 42, 0.82);
     border: 1px solid rgba(148, 163, 184, 0.25);
     border-radius: 10px;
     padding: 8px 10px;
-    selection-background-color: #2563eb;
-    selection-color: #f8fafc;
+    selection-background-color: rgba(59, 130, 246, 0.45);
 }
-QListWidget::item {
-    padding: 10px;
+QTextBrowser {
+    background-color: rgba(9, 14, 26, 0.9);
+    border: 1px solid rgba(148, 163, 184, 0.18);
+    border-radius: 14px;
+    padding: 14px;
 }
-QListWidget::item:selected {
-    background-color: rgba(37, 99, 235, 0.18);
-    color: #f8fafc;
+QTableWidget {
+    background-color: rgba(9, 14, 26, 0.9);
+    border: 1px solid rgba(148, 163, 184, 0.22);
+    border-radius: 14px;
+    gridline-color: rgba(148, 163, 184, 0.18);
+}
+QHeaderView::section {
+    background-color: rgba(30, 41, 59, 0.95);
+    color: #e2e8f0;
+    padding: 8px;
+    border: none;
 }
 QProgressBar {
-    border: 1px solid rgba(148, 163, 184, 0.2);
-    border-radius: 10px;
-    background-color: rgba(15, 23, 42, 0.6);
+    border: 1px solid rgba(148, 163, 184, 0.18);
+    border-radius: 12px;
+    background-color: rgba(15, 23, 42, 0.7);
     text-align: center;
     color: #cbd5f5;
 }
 QProgressBar::chunk {
-    border-radius: 10px;
+    border-radius: 12px;
     background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
         stop:0 #3b82f6,
         stop:1 #38bdf8);
-}
-QToolButton {
-    background-color: rgba(15, 23, 42, 0.7);
-    border: 1px solid rgba(148, 163, 184, 0.2);
-    border-radius: 10px;
-    padding: 6px 10px;
-}
-QSplitter::handle {
-    background-color: rgba(148, 163, 184, 0.2);
-    width: 3px;
-    margin: 0 6px;
 }
 """
 
@@ -653,7 +673,7 @@ class Embedder:
 
 
 class GPTMini:
-    """Модель для HyDE и rerank (подбираем первую доступную)."""
+    """Модель для HyDE-подсказок (подбираем первую доступную)."""
     def __init__(self, api_key: str):
         self.client = OpenAI(api_key=api_key, timeout=20.0)
         self.model = None
@@ -669,54 +689,6 @@ class GPTMini:
         if not self.model:
             self.model = CHAT_RERANK_MODEL_CANDIDATES[0]
 
-    def rerank(self, query: str, candidates: List[Dict], topk: int = 5) -> List[Tuple[str, float]]:
-        payload = []
-        for i, c in enumerate(candidates, 1):
-            t = c.get("title") or ""
-            meta = c.get("meta") or ""
-            txt = (c.get("text") or "")[:1000]
-            payload.append({"index": i, "title": t, "meta": meta, "text": txt})
-
-        prompt = {
-            "instruction": (
-                "Оцени релевантность каждого кандидата запросу по шкале 0..100. "
-                "Верни строго JSON с ключом 'scores': массив объектов {\"index\":N, \"score\":float}. "
-                "Учитывай соответствие норм, статей и сути запроса."
-            ),
-            "query": query,
-            "candidates": payload
-        }
-        try:
-            def _call():
-                return self.client.chat.completions.create(
-                    model=self.model,
-                    messages=[{"role":"user","content":json.dumps(prompt, ensure_ascii=False)}],
-                    temperature=0,
-                    response_format={"type":"json_object"}
-                )
-            r = backoff_retry(_call)
-            txt = r.choices[0].message.content or "{}"
-            try:
-                data = json.loads(txt)
-                arr = data.get("scores", [])
-                if not isinstance(arr, list): arr = []
-            except Exception:
-                arr = []
-            scored = []
-            for obj in arr:
-                try:
-                    idx = int(obj.get("index", 0)) - 1
-                    sc  = float(obj.get("score", 0))
-                    if 0 <= idx < len(candidates):
-                        scored.append((candidates[idx]["id"], sc))
-                except Exception:
-                    continue
-            scored.sort(key=lambda x: x[1], reverse=True)
-            return scored[:topk] if scored else [(c["id"], 0.0) for c in candidates[:topk]]
-        except Exception as e:
-            logger.warning(f"rerank fallback: {e}")
-            return [(c["id"], 0.0) for c in candidates[:topk]]
-
     def hyde_expand(self, query: str) -> str:
         try:
             def _call():
@@ -731,26 +703,6 @@ class GPTMini:
         except Exception as e:
             logger.warning(f"HyDE fallback: {e}")
             return query
-
-    def answer_with_context(self, question: str, contexts: List[str]) -> str:
-        sep = "\n\n---\n\n"
-        ctx = sep.join(contexts[:5])
-        prompt = (
-            "Используя исключительно приведённые выдержки из ГК РФ, ответь на вопрос. "
-            "Чётко указывай статьи/пункты. Если данных недостаточно — скажи, чего не хватает.\n\n"
-            f"Вопрос: {question}\n\nКонтекст:\n{ctx}"
-        )
-        try:
-            def _call():
-                return self.client.chat.completions.create(
-                    model=self.model,
-                    messages=[{"role":"user","content":prompt}],
-                    temperature=0
-                )
-            r = backoff_retry(_call)
-            return (r.choices[0].message.content or "").strip()
-        except Exception as e:
-            return f"(GPT-mini не ответил: {e})"
 
 
 class Enricher:
@@ -1232,22 +1184,22 @@ class MainWindow(QtWidgets.QMainWindow):
         self.nav_list.currentRowChanged.connect(self.on_page_changed)
 
         import_page = self.build_import_page()
-        self.register_page("📥 Импорт", "Загружайте документы и сразу видите аналитику текста перед векторизацией.", import_page)
+        self.register_page("1️⃣ Импорт", "Шаг 1. Соберите документы и посмотрите автоматическую аналитику перед векторизацией.", import_page)
 
         index_page = self.build_index_page()
-        self.register_page("⚙️ Индексация", "Готовьте батчи и отправляйте документы в Qdrant с подсказками по ключевым настройкам.", index_page)
+        self.register_page("2️⃣ Индексация", "Шаг 2. Укажите ключ OpenAI и отправьте статьи и чанки в Qdrant.", index_page)
 
         search_page = self.build_search_page()
-        self.register_page("🔍 Поиск", "Тестируйте поиск по векторной базе с подсказками HyDE, rerank и фильтрами по дате.", search_page)
+        self.register_page("3️⃣ Поиск", "Шаг 3. Проверяйте базу: задавайте вопросы и просматривайте найденные нормы.", search_page)
 
         vector_page = self.build_vector_lab_page()
-        self.register_page("🧪 Vector Lab", "Исследуйте эмбеддинги и проверяйте выдачу Qdrant прямо из приложения.", vector_page)
+        self.register_page("🔬 Лаборатория", "Необязательный модуль для экспериментов с эмбеддингами и отладкой Qdrant.", vector_page)
 
-        tests_page = self.build_tests_page()
-        self.register_page("🧭 Тесты", "Быстро проверяйте типовые запросы и сравнивайте ответы.", tests_page)
+        help_page = self.build_help_page()
+        self.register_page("ℹ️ Справка", "Пояснения к каждому шагу, ответы на частые вопросы и советы по устранению ошибок.", help_page)
 
         log_page = self.build_log_page()
-        self.register_page("📘 Лог", "Все действия приложения фиксируются здесь — удобно проверять ход индексации.", log_page)
+        self.register_page("📝 Журнал", "Все действия приложения фиксируются здесь — удобно контролировать индексацию.", log_page)
 
         self.nav_list.setCurrentRow(0)
 
@@ -1267,12 +1219,23 @@ class MainWindow(QtWidgets.QMainWindow):
         title = QtWidgets.QLabel("Vector Studio для ГК РФ")
         title.setObjectName("Headline")
         subtitle = QtWidgets.QLabel(
-            "Импортируйте кодекс, обогащайте описания, создавайте эмбеддинги и тестируйте выдачу — всё в одном окне."
+            "Пошаговый помощник: загрузите файлы, подготовьте корпус, отправьте в Qdrant и протестируйте выдачу."
         )
         subtitle.setObjectName("SubHeadline")
         subtitle.setWordWrap(True)
+        steps = QtWidgets.QLabel(
+            "<ol style='margin:4px 0 0 18px'>"
+            "<li><b>Импорт</b> — добавьте документы и проверьте автоматическую аналитику.</li>"
+            "<li><b>Индексация</b> — введите ключ OpenAI и отправьте статьи в Qdrant.</li>"
+            "<li><b>Поиск</b> — задайте вопрос и изучите найденные нормы.</li>"
+            "<li><b>Справка</b> — откройте подсказки, если что-то неочевидно.</li>"
+            "</ol>"
+        )
+        steps.setObjectName("OptionHint")
+        steps.setWordWrap(True)
         layout.addWidget(title)
         layout.addWidget(subtitle)
+        layout.addWidget(steps)
         return frame
 
     def configure_nav_list(self):
@@ -1865,7 +1828,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 msg += f"\nВНИМАНИЕ: VECTOR_SIZE={VECTOR_SIZE} → обновите до {dim} и пересоздайте коллекции."
             try:
                 gpt_test = GPTMini(key)
-                msg += f"\nМодель для HyDE/rerank: {gpt_test.model}"
+                msg += f"\nМодель для HyDE: {gpt_test.model}"
             except Exception:
                 pass
             self.log(msg)
@@ -2013,7 +1976,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         layout.addWidget(self.section_header(
             "Поиск по векторной базе",
-            "Формулируйте запрос, выбирайте настройки ассоциаций и смотрите, какие нормы отвечает система."
+            "Формулируйте запрос, при необходимости включайте HyDE-подсказку и сразу смотрите найденные нормы."
         ))
 
         query_card = self.create_card()
@@ -2083,16 +2046,6 @@ class MainWindow(QtWidgets.QMainWindow):
             "HyDE генерирует гипотетический ответ и эмбеддит его. Это помогает поймать смыслы, даже если формулировка запроса редкая."
         )
 
-        self.chk_rerank = QtWidgets.QCheckBox("Включить rerank")
-        self.chk_rerank.setChecked(False)
-        row = self.add_toggle_row(
-            params_grid,
-            row,
-            "GPT-rerank",
-            self.chk_rerank,
-            "Пересортировывает топ найденных фрагментов через GPT-мини-модель. Точность выше, но тратятся токены."
-        )
-
         self.chk_client_pref = QtWidgets.QCheckBox("Включить префильтр")
         self.chk_client_pref.setChecked(True)
         row = self.add_toggle_row(
@@ -2132,7 +2085,7 @@ class MainWindow(QtWidgets.QMainWindow):
         btns.addStretch(1)
         context_layout.addLayout(btns)
         context_hint = QtWidgets.QLabel(
-            "Контекст можно сразу отправить в GPT-mini (если включён rerank) или использовать для валидации ответов вручную."
+            "Контекст можно скопировать в любую LLM или использовать как проверку найденных норм вручную."
         )
         context_hint.setObjectName("OptionHint")
         context_hint.setWordWrap(True)
@@ -2172,67 +2125,89 @@ class MainWindow(QtWidgets.QMainWindow):
         self.cache_progress_lbl.setText("Кэш очищен")
         self.log("Поисковый кэш очищен.")
 
-    # ---------- Tests ----------
-    def build_tests_page(self) -> QtWidgets.QWidget:
+    def _compat_named_search(self, client: QdrantClient, collection: str, vector_name: str, vector: List[float], limit: int):
+        attempts = [
+            {"query_vector": (vector_name, vector)},
+            {"query_vector": {"name": vector_name, "vector": vector}},
+        ]
+        for base in attempts:
+            for filter_key in ("query_filter", "filter"):
+                kwargs = dict(
+                    collection_name=collection,
+                    limit=limit,
+                    with_payload=True,
+                    with_vectors=False,
+                )
+                kwargs.update(base)
+                try:
+                    return client.search(**kwargs)
+                except TypeError:
+                    continue
+        raise RuntimeError("Эта версия qdrant-client не поддерживает совместимый поиск по named-векторам.")
+
+    def build_help_page(self) -> QtWidgets.QWidget:
         page = QtWidgets.QWidget()
         layout = QtWidgets.QVBoxLayout(page)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(18)
 
         layout.addWidget(self.section_header(
-            "Тестовые сценарии",
-            "Набор демонстрационных запросов помогает быстро проверить качество индексации и поиск по базовым ситуациям."
+            "Справка и подсказки",
+            "Короткие ответы на вопросы «зачем нужна каждая опция» и что делать при ошибках."
         ))
 
-        card = self.create_card()
-        card_layout = card.layout()
-        card_layout.addWidget(QtWidgets.QLabel("Выберите тест"))
+        quick_card = self.create_card()
+        quick_layout = quick_card.layout()
+        quick_title = QtWidgets.QLabel("План действий")
+        quick_title.setObjectName("SectionTitle")
+        quick_layout.addWidget(quick_title)
+        quick_text = QtWidgets.QLabel(
+            "<ol style='margin-left:18px'>"
+            "<li><b>Импорт.</b> Добавьте файлы и убедитесь, что анализ не показывает предупреждений по токенам.</li>"
+            "<li><b>Индексация.</b> Введите ключ OpenAI, проверьте размерность и запустите потоковую загрузку в Qdrant.</li>"
+            "<li><b>Поиск.</b> Сформулируйте вопрос, при необходимости задайте дату as-of и получите контекст.</li>"
+            "<li><b>Лаборатория.</b> Используйте только если нужна ручная проверка эмбеддингов или точечный upsert.</li>"
+            "</ol>"
+        )
+        quick_text.setObjectName("OptionHint")
+        quick_text.setWordWrap(True)
+        quick_layout.addWidget(quick_text)
+        layout.addWidget(quick_card)
 
-        self.tests = QtWidgets.QListWidget()
-        for q in [
-            "ст. 395 проценты за пользование чужими денежными средствами",
-            "исключительное право на коммерческое обозначение",
-            "секрет производства (ноу-хау) ответственность",
-            "принудительная лицензия условия",
-            "ответственность за незаконное использование товарного знака",
-        ]:
-            self.tests.addItem(q)
-        self.tests.setToolTip("Дважды щёлкните по пункту или используйте кнопки ниже, чтобы запустить поиск с преднастроенным запросом.")
-        self.tests.itemDoubleClicked.connect(lambda _: self.run_one_test())
-        card_layout.addWidget(self.tests)
+        faq_card = self.create_card()
+        faq_layout = faq_card.layout()
+        faq_layout.addWidget(QtWidgets.QLabel("Частые вопросы"))
+        faq_text = QtWidgets.QLabel(
+            "<ul style='margin-left:16px'>"
+            "<li><b>Зачем ключ OpenAI?</b> Он нужен, чтобы считать эмбеддинги и, при желании, обогащать summary.</li>"
+            "<li><b>Что такое HyDE?</b> Это генерация чернового ответа перед поиском. Если запросы простые, можно отключить.</li>"
+            "<li><b>Нужен ли Qdrant-сервер?</b> Локальная папка создаётся автоматически. Для production используйте удалённый инстанс.</li>"
+            "<li><b>Как понять, что документ готов?</b> На вкладке импорта смотрите на предупреждения и количество токенов.</li>"
+            "</ul>"
+        )
+        faq_text.setObjectName("OptionHint")
+        faq_text.setWordWrap(True)
+        faq_layout.addWidget(faq_text)
+        layout.addWidget(faq_card)
 
-        btns = QtWidgets.QHBoxLayout()
-        self.btn_run_one = QtWidgets.QPushButton("Выполнить выбранный")
-        self.btn_run_one.clicked.connect(self.run_one_test)
-        self.btn_run_all = QtWidgets.QPushButton("Выполнить все")
-        self.btn_run_all.clicked.connect(self.run_all_tests)
-        btns.addWidget(self.btn_run_one)
-        btns.addWidget(self.btn_run_all)
-        btns.addStretch(1)
-        card_layout.addLayout(btns)
+        tips_card = self.create_card()
+        tips_layout = tips_card.layout()
+        tips_layout.addWidget(QtWidgets.QLabel("Если что-то пошло не так"))
+        tips_text = QtWidgets.QLabel(
+            "<ul style='margin-left:16px'>"
+            "<li><b>Нет ключа.</b> Введите тестовый плейсхолдер или задайте переменную окружения OPENAI_API_KEY.</li>"
+            "<li><b>Несовпадение размерности.</b> Откройте вкладку индексации и нажмите «Проверить OpenAI» — приложение подскажет верное значение.</li>"
+            "<li><b>Слишком длинный текст.</b> Сократите документ или разбейте его — приложение покажет предупреждение в аналитике.</li>"
+            "<li><b>Ничего не находится.</b> Убедитесь, что коллекции проиндексированы и прогрели кэш кнопкой «Очистить кэш» на вкладке поиска.</li>"
+            "</ul>"
+        )
+        tips_text.setObjectName("OptionHint")
+        tips_text.setWordWrap(True)
+        tips_layout.addWidget(tips_text)
+        layout.addWidget(tips_card)
 
-        self.test_out = QtWidgets.QTextBrowser()
-        self.test_out.setPlaceholderText("Здесь появится журнал запуска тестовых запросов.")
-        card_layout.addWidget(self.test_out)
-
-        layout.addWidget(card, 1)
         layout.addStretch(1)
         return page
-
-    def run_one_test(self):
-        item = self.tests.currentItem()
-        if not item:
-            return
-        self.run_test_query(item.text())
-
-    def run_all_tests(self):
-        for i in range(self.tests.count()):
-            self.run_test_query(self.tests.item(i).text())
-
-    def run_test_query(self, qtxt: str):
-        self.ed_query.setText(qtxt)
-        self.do_search()
-        self.test_out.append(f"✓ Тест выполнен: {qtxt}")
 
     # ---------- Vector Lab ----------
     def build_vector_lab_page(self) -> QtWidgets.QWidget:
@@ -2243,7 +2218,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         layout.addWidget(self.section_header(
             "Vector Lab",
-            "Экспериментальная лаборатория: создавайте эмбеддинги, смотрите ключевые метрики и сразу проверяйте их в Qdrant."
+            "Опциональная лаборатория: создавайте эмбеддинги, смотрите ключевые метрики и проверяйте их в Qdrant, когда нужны дополнительные проверки."
         ))
 
         top_card = self.create_card()
@@ -2387,15 +2362,12 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         try:
             qdr = QdrantIndex(QDRANT_PATH)
-            res = qdr.client.query_points(
-                collection_name=collection_name,
-                query=qm.NamedQuery(
-                    name=self.vlab_vector_type.currentText(),
-                    vector=vector,
-                    limit=self.vlab_limit.value(),
-                ),
-                with_payload=True,
-                with_vectors=False,
+            res = self._compat_named_search(
+                qdr.client,
+                collection_name,
+                self.vlab_vector_type.currentText(),
+                vector,
+                self.vlab_limit.value(),
             )
         except Exception as e:
             QtWidgets.QMessageBox.critical(self, "Vector Lab", f"Ошибка поиска в Qdrant: {e}")
@@ -2454,7 +2426,6 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         k = int(self.spin_k.value())
         use_hyde = self.chk_hyde.isChecked()
-        use_rerank = self.chk_rerank.isChecked()
         use_client_pref = self.chk_client_pref.isChecked()
 
         m_art = re.search(r"ст\.?\s*(\d+(?:\.\d+)*)", qtxt.lower())
@@ -2628,27 +2599,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         prelim_points = pick_points_from_cache(ranked_ids)[:max(20, k * 4)]
 
-        gpt_for_rerank = GPTMini(key) if (key and use_rerank) else None
-        if gpt_for_rerank:
-            cands = []
-            id2p = {}
-            for p in prelim_points:
-                pl = p.payload or {}
-                qid = str(getattr(p, "id", "") or "")
-                if not qid:
-                    continue
-                cands.append({
-                    "id": qid,
-                    "title": pl.get("title"),
-                    "meta": f"Часть: {pl.get('part')}; Глава: {pl.get('chapter')}; Статья: {pl.get('article')}",
-                    "text": pl.get("text") or "",
-                })
-                id2p[qid] = p
-            reranked = gpt_for_rerank.rerank(qtxt, cands, topk=max(k, 3))
-            top_ids = [cid for cid, _ in reranked]
-            points = [id2p[pid] for pid in top_ids if pid in id2p]
-        else:
-            points = prelim_points[:k]
+        points = prelim_points[:k]
 
         follow_articles = []
         for p in points:
@@ -2709,11 +2660,6 @@ class MainWindow(QtWidgets.QMainWindow):
             sep = "\n\n---\n\n"
             joined_ctx = sep.join(self._last_rag_blocks)
             out.append("<pre style='white-space:pre-wrap;font-family:inherit;background:rgba(15,23,42,0.85);border-radius:12px;padding:14px;'>" + safe_html(joined_ctx) + "</pre>")
-
-        if self._last_rag_blocks and (gpt_for_rerank is not None):
-            ans = gpt_for_rerank.answer_with_context(qtxt, self._last_rag_blocks)
-            out.append("<h4>Черновой ответ GPT-mini</h4>")
-            out.append(f"<div style='white-space:pre-wrap;border:1px solid rgba(148,163,184,0.3);border-radius:12px;padding:12px;background:rgba(15,23,42,0.7);'>{safe_html(ans)}</div>")
 
         self.results.setHtml("\n".join(out))
 
