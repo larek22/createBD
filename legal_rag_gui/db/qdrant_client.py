@@ -77,8 +77,30 @@ class QdrantManager:
 
     # ------------------------------------------------------------------
     def list_collections(self) -> List[str]:
+        """Return available collection names.
+
+        The HTTP API has changed its response shape across Qdrant versions:
+
+        * <= 1.4 returned ``{"result": [{"name": "foo"}]}``
+        * >= 1.5 wraps the list under ``{"result": {"collections": [...]}}``
+
+        To stay compatible with both variants (and whatever future schema adds
+        additional metadata keys) we normalise the payload before reading it.
+        """
+
         data = self._request("GET", "/collections")
-        return [item.get("name", "") for item in data.get("result", [])]
+        result = data.get("result", [])
+
+        if isinstance(result, dict):
+            result = result.get("collections", [])
+
+        names: List[str] = []
+        for entry in result:
+            if isinstance(entry, dict):
+                names.append(str(entry.get("name", "")))
+            elif isinstance(entry, str):  # pragma: no cover - defensive branch
+                names.append(entry)
+        return names
 
     # ------------------------------------------------------------------
     def collection_exists(self, name: str = COLLECTION_NAME) -> bool:

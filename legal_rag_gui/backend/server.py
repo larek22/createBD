@@ -63,14 +63,20 @@ def health() -> dict:
 
 @app.get("/health/qdrant")
 def health_qdrant() -> dict:
+    manager: QdrantManager | None = None
     try:
         manager = QdrantManager(settings.qdrant_url, settings.qdrant_api_key or None)
         collections = manager.list_collections()
-        manager.close()
         return {"ok": True, "collections": collections}
     except Exception as exc:  # pragma: no cover - depends on external service
         LOGGER.warning("Qdrant health failed: %s", exc)
         return {"ok": False, "error": str(exc)}
+    finally:
+        if manager is not None:
+            try:
+                manager.close()
+            except Exception:  # pragma: no cover - best effort cleanup
+                pass
 
 
 @app.get("/health/openai")
