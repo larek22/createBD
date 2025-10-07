@@ -100,12 +100,13 @@ class BackendProcessManager:
             "--port",
             str(self.port),
         ]
+        project_root = Path(__file__).resolve().parents[2]
         self._process = subprocess.Popen(  # noqa: S603
             cmd,
             stdout=self._log_handle,
             stderr=subprocess.STDOUT,
             env=env,
-            cwd=str(Path(__file__).resolve().parents[1]),
+            cwd=str(project_root),
         )
 
     def _is_alive(self) -> bool:
