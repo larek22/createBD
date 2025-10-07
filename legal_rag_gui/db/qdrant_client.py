@@ -84,6 +84,8 @@ class QdrantManager:
             "chapter": qm.PayloadSchemaType.KEYWORD,
             "article": qm.PayloadSchemaType.KEYWORD,
             "status": qm.PayloadSchemaType.KEYWORD,
+            "effective_from": qm.PayloadSchemaType.DATETIME,
+            "effective_to": qm.PayloadSchemaType.DATETIME,
         }
         try:
             schema = self.client.get_collection(name).payload_schema or {}
