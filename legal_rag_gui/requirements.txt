@@ -1,0 +1,17 @@
+fastapi==0.115.0
+starlette==0.38.2
+pydantic==2.9.2
+pydantic-settings==2.4.0
+uvicorn[standard]==0.31.1
+httpx==0.27.2
+requests==2.32.3
+PySide6==6.7.2
+qasync==0.27.1
+PyYAML==6.0.2
+python-dotenv==1.0.1
+python-docx==1.1.2
+striprtf==0.0.26
+pdfminer.six==20231228
+python-dateutil==2.9.0.post0
+pytest==8.3.3
+pytest-qt==4.4.0
