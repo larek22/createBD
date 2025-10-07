@@ -11,6 +11,7 @@ import httpx
 from PySide6 import QtCore, QtGui, QtWidgets
 
 from .backend import server  # ensures FastAPI app is importable when uvicorn runs
+from .utils.backend_launcher import BackendProcessManager
 from .utils.config import SettingsStore
 from .utils.logger import configure_logging
 from .ui.tabs.create_base_tab import CreateBaseTab
@@ -103,6 +104,7 @@ class MainWindow(QtWidgets.QMainWindow):
         super().__init__()
         configure_logging()
         self.settings = SettingsStore()
+        self.backend_manager = BackendProcessManager(self.settings)
         self.backend = BackendClient(self.settings)
         self.pool = QtCore.QThreadPool.globalInstance()
 
@@ -110,6 +112,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.resize(1280, 780)
         self._setup_ui()
         self._connect_signals()
+        QtCore.QTimer.singleShot(0, self._ensure_backend_running)
 
     # ------------------------------------------------------------------
     def _setup_ui(self) -> None:
@@ -179,6 +182,13 @@ class MainWindow(QtWidgets.QMainWindow):
         task = AsyncTask(coro)
         self.pool.start(task)
 
+    def _ensure_backend_running(self) -> None:
+        self.log_box.appendPlainText("⏳ Проверяем подключение…")
+        if self.backend_manager.ensure_running():
+            self.log_box.appendPlainText(f"✅ Backend запущен на {self.backend_manager.base_url}")
+        else:
+            self.log_box.appendPlainText("❌ Не удалось запустить backend. Проверьте настройки и логи.")
+
     def _start_ingest(self, payload: dict) -> None:
         self.log_box.appendPlainText("→ Отправляем задания на backend…")
         self._submit(lambda: self.backend.ingest(payload))
@@ -201,8 +211,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self.log_box.appendPlainText(f"Готово: {count} записей.")
 
     def _test_connections(self) -> None:
+        if not self.backend_manager.ensure_running():
+            self.log_box.appendPlainText("❌ Backend недоступен. Проверьте лог backend.log")
+            return
         self.log_box.appendPlainText("⏳ Проверяем подключение…")
         self._submit(lambda: self.backend.search({"query": "ping", "top_k": 1}))
+
+    def closeEvent(self, event: QtGui.QCloseEvent) -> None:  # pragma: no cover - GUI shutdown
+        self.backend_manager.shutdown()
+        super().closeEvent(event)
 
 
 def main() -> int:
