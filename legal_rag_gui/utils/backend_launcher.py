@@ -8,6 +8,7 @@ import subprocess
 import sys
 import threading
 import time
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Optional
 
@@ -26,6 +27,8 @@ class BackendProcessManager:
         self._process: Optional[subprocess.Popen[bytes]] = None
         self._lock = threading.Lock()
         self._log_handle: Optional[object] = None
+        self._log_path: Optional[Path] = None
+        self._last_error: str = ""
         atexit.register(self.shutdown)
 
     # ------------------------------------------------------------------
@@ -42,6 +45,7 @@ class BackendProcessManager:
         """Spin up the backend if it is not already reachable."""
         if self._is_alive():
             LOGGER.debug("Backend already reachable at %s", self.base_url)
+            self._last_error = ""
             return True
 
         with self._lock:
@@ -57,7 +61,11 @@ class BackendProcessManager:
                 return True
             time.sleep(0.3)
 
-        LOGGER.error("Backend did not become ready within %.1f seconds", timeout)
+        self._last_error = f"Backend did not become ready within {timeout:.1f} seconds"
+        LOGGER.error("%s", self._last_error)
+        tail = self.get_log_tail()
+        if tail:
+            LOGGER.error("Backend log tail:\n%s", tail)
         self.shutdown()
         return False
 
@@ -80,16 +88,26 @@ class BackendProcessManager:
                     pass
             self._process = None
             self._log_handle = None
+            self._log_path = None
 
     # ------------------------------------------------------------------
     def _spawn_process(self) -> None:
         logs_dir = Path(self._settings.data.logs_dir)
         logs_dir.mkdir(parents=True, exist_ok=True)
         log_path = logs_dir / "backend.log"
+        self._log_path = log_path
         env = os.environ.copy()
         env.setdefault("PYTHONUNBUFFERED", "1")
+        env.setdefault("QDRANT_URL", self._settings.data.qdrant_url)
+        if self._settings.data.qdrant_api_key:
+            env["QDRANT_API_KEY"] = self._settings.data.qdrant_api_key
+        if self._settings.data.openai_api_key:
+            env["OPENAI_API_KEY"] = self._settings.data.openai_api_key
 
         self._log_handle = open(log_path, "a", encoding="utf-8")  # noqa: SIM115
+        timestamp = datetime.now(UTC).isoformat()
+        self._log_handle.write(f"\n=== Backend restart @ {timestamp} ===\n")
+        self._log_handle.flush()
         cmd = [
             sys.executable,
             "-m",
@@ -108,6 +126,8 @@ class BackendProcessManager:
             env=env,
             cwd=str(project_root),
         )
+        pid = getattr(self._process, "pid", "?")
+        LOGGER.info("Spawned backend process pid=%s using %s", pid, sys.executable)
 
     def _is_alive(self) -> bool:
         try:
@@ -115,6 +135,26 @@ class BackendProcessManager:
             return response.status_code == 200
         except Exception:
             return False
+
+    # ------------------------------------------------------------------
+    @property
+    def log_path(self) -> Optional[Path]:
+        return self._log_path
+
+    @property
+    def last_error(self) -> str:
+        return self._last_error
+
+    def get_log_tail(self, lines: int = 40) -> str:
+        path = self._log_path
+        if not path or not path.exists():
+            return ""
+        try:
+            with path.open("r", encoding="utf-8", errors="ignore") as fh:
+                content = fh.readlines()
+            return "".join(content[-lines:]).strip()
+        except Exception:
+            return ""
 
 
 __all__ = ["BackendProcessManager"]

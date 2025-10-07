@@ -217,7 +217,14 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.backend_manager.ensure_running():
             self.log_box.appendPlainText(f"✅ Backend запущен на {self.backend_manager.base_url}")
         else:
-            self.log_box.appendPlainText("❌ Не удалось запустить backend. Проверьте настройки и логи.")
+            message = self.backend_manager.last_error or "Не удалось запустить backend"
+            self.log_box.appendPlainText(f"❌ {message}. Проверьте настройки и логи.")
+            log_path = self.backend_manager.log_path
+            if log_path:
+                self.log_box.appendPlainText(f"ℹ️ Лог backend: {log_path}")
+                tail = self.backend_manager.get_log_tail()
+                if tail:
+                    self.log_box.appendPlainText(tail)
 
     def _start_ingest(self, payload: dict) -> None:
         self.log_box.appendPlainText("→ Отправляем задания на backend…")

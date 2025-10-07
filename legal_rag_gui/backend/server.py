@@ -28,10 +28,14 @@ class Settings(BaseModel):
     app_port: int = int(os.getenv("APP_PORT", str(_store.data.last_backend_port or 8765)))
 
 
-configure_logging()
+log_path = configure_logging()
 LOGGER = logging.getLogger(__name__)
 
 settings = Settings()
+LOGGER.info("Backend starting. Logs: %s", log_path)
+LOGGER.info("Configured Qdrant URL: %s", settings.qdrant_url)
+LOGGER.info("OpenAI key present: %s", bool(settings.openai_api_key))
+
 _store.update(
     qdrant_url=settings.qdrant_url,
     qdrant_api_key=settings.qdrant_api_key or "",
