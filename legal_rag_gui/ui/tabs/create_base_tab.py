@@ -56,9 +56,11 @@ class CreateBaseTab(QtWidgets.QWidget):
         self.auto_chunk = QtWidgets.QCheckBox("Автоматически находить статьи и главы")
         self.auto_chunk.setChecked(True)
         self.auto_chunk.setToolTip("Оставь включённым, чтобы программа сама разбила документ на статьи.")
-        self.gpt_summary = QtWidgets.QCheckBox("Создавать аннотации GPT-5-nano")
+        self.gpt_summary = QtWidgets.QCheckBox("Создавать аннотации GPT-4.1-mini")
         self.gpt_summary.setChecked(True)
-        self.gpt_summary.setToolTip("Короткие резюме помогают быстрее понять смысл статьи.")
+        self.gpt_summary.setToolTip(
+            "Включи, чтобы модель GPT-4.1-mini написала короткие резюме и ключевые фразы к каждой статье."
+        )
         self.append_mode = QtWidgets.QCheckBox("Добавить к существующей базе")
         self.append_mode.setChecked(True)
         self.append_mode.setToolTip("Выключи, если хочешь собрать базу заново и не смешивать со старой.")

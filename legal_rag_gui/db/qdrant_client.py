@@ -4,10 +4,11 @@ from __future__ import annotations
 import hashlib
 import logging
 from dataclasses import dataclass
-from typing import Iterable, List, Optional
+from typing import Any, Iterable, List, Optional
 
 try:  # pragma: no cover - optional dependency during tests
     from qdrant_client import QdrantClient
+    from qdrant_client.http import models as qm
     from qdrant_client.http.models import (
         Distance,
         NamedVectorParams,
@@ -20,7 +21,7 @@ try:  # pragma: no cover - optional dependency during tests
     )
 except Exception:  # pragma: no cover
     QdrantClient = None  # type: ignore
-    Distance = NamedVectorParams = OptimizersConfigDiff = PointStruct = ScalarQuantization = ScalarQuantizationConfig = ScalarType = VectorParams = None  # type: ignore
+    Distance = NamedVectorParams = OptimizersConfigDiff = PointStruct = ScalarQuantization = ScalarQuantizationConfig = ScalarType = VectorParams = qm = None  # type: ignore
 
 LOGGER = logging.getLogger(__name__)
 
@@ -53,6 +54,7 @@ class QdrantManager:
     # ------------------------------------------------------------------
     def ensure_collection(self, name: str = COLLECTION_NAME) -> None:
         if self.client.collection_exists(name):
+            self._ensure_payload_indexes(name)
             return
         LOGGER.info("Creating Qdrant collection %s", name)
         vectors_config = NamedVectorParams(
@@ -70,6 +72,34 @@ class QdrantManager:
             optimizers_config=OptimizersConfigDiff(default_segment_number=2),
             quantization_config=quant,
         )
+        self._ensure_payload_indexes(name)
+
+    # ------------------------------------------------------------------
+    def _ensure_payload_indexes(self, name: str) -> None:
+        if qm is None:
+            return
+        desired = {
+            "code": qm.PayloadSchemaType.KEYWORD,
+            "part": qm.PayloadSchemaType.KEYWORD,
+            "chapter": qm.PayloadSchemaType.KEYWORD,
+            "article": qm.PayloadSchemaType.KEYWORD,
+            "status": qm.PayloadSchemaType.KEYWORD,
+        }
+        try:
+            schema = self.client.get_collection(name).payload_schema or {}
+        except Exception:
+            schema = {}
+        for field, schema_type in desired.items():
+            if field in schema:
+                continue
+            try:
+                self.client.create_payload_index(
+                    collection_name=name,
+                    field_name=field,
+                    field_schema=schema_type,
+                )
+            except Exception:
+                continue
 
     # ------------------------------------------------------------------
     def upsert(self, points: Iterable[VectorPayload], name: str = COLLECTION_NAME) -> None:
@@ -106,7 +136,7 @@ class QdrantManager:
         name: str = COLLECTION_NAME,
         vector_name: str = "body_vec",
         limit: int = 5,
-        filters: Optional[qm.Filter] = None,
+        filters: Optional[Any] = None,
     ) -> List[qm.ScoredPoint]:
         self.ensure_collection(name)
         return self.client.search(

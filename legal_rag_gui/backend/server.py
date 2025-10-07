@@ -14,7 +14,7 @@ from ..utils.config import SettingsStore
 from ..utils.logger import configure_logging
 from .ai_client import get_client
 from .ingest import IngestRequest, IngestService
-from .search import SearchRequest, SearchService
+from .search import SearchRequest, SearchResponse, SearchService
 from .test_suite import QualityReport, TestRequest, TestService
 
 
@@ -79,10 +79,9 @@ def ingest_start(request: IngestRequest) -> dict:
     return {"articles": count}
 
 
-@app.post("/search", response_model=QualityReport, response_model_exclude_none=True)
-def search_endpoint(request: SearchRequest):  # type: ignore[override]
-    response = _search.search(request)
-    return {"created_at": "", "summary": "", "cases": [{"name": item.get("article", ""), "status": "match", "score": item.get("score", 0.0), "details": item.get("summary", "") } for item in response.items]}
+@app.post("/search", response_model=SearchResponse)
+def search_endpoint(request: SearchRequest) -> SearchResponse:
+    return _search.search(request)
 
 
 @app.post("/tests/run", response_model=QualityReport)

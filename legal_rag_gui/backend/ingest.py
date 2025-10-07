@@ -84,6 +84,7 @@ class IngestService:
                     "status": "действует",
                     "effective_from": None,
                     "effective_to": None,
+                    "clause": None,
                     "summary": enrich.get("summary", ""),
                     "keywords": enrich.get("keywords", []),
                     "chunk_id": f"{article.identifier}:{idx}",

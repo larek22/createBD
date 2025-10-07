@@ -40,8 +40,10 @@ class OpenAIManager:
         payload = {"input": list(texts), "model": model}
         data = self._post("/embeddings", payload)
         if "data" not in data:
-            return [[0.0] * 4 for _ in texts]
-        vectors = [item["embedding"] for item in data.get("data", [])]
+            return [[0.0] * 3072 for _ in texts]
+        vectors = [item.get("embedding", [0.0] * 3072) for item in data.get("data", [])]
+        if not vectors:
+            vectors = [[0.0] * 3072 for _ in texts]
         return vectors
 
     def summarize(self, text: str, *, model: str = "gpt-4.1-mini") -> str:

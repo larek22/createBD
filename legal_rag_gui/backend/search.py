@@ -34,20 +34,24 @@ class SearchService:
         if not query:
             return SearchResponse(items=[])
 
-        client = get_client(self.settings.data.openai_api_key)
+        api_key = self.settings.data.openai_api_key
+        client = get_client(api_key)
         qdrant = QdrantManager(self.settings.data.qdrant_url, self.settings.data.qdrant_api_key or None)
         LOGGER.info("Search query: %s", query)
 
-        title_vec = client.embed([query])[0]
-        body_vec = client.embed([query])[0]
+        embedding = client.embed([query])
+        if not embedding:
+            return SearchResponse(items=[])
+        title_vec = embedding[0]
+        body_vec = embedding[0]
 
         title_points = qdrant.search(title_vec, vector_name="title_vec", limit=max(20, request.top_k * 4))
         body_points = qdrant.search(body_vec, vector_name="body_vec", limit=max(40, request.top_k * 6))
 
         combined = self._combine_rrf(title_points, body_points)
         top_candidates = combined[: max(12, request.top_k * 2)]
-        reranked = self._rerank(client, query, top_candidates)
-        final = reranked[: request.top_k]
+        reranked = self._rerank(client, query, top_candidates, api_key)
+        final = [self._decorate(item) for item in reranked[: request.top_k]]
         return SearchResponse(items=final)
 
     # ------------------------------------------------------------------
@@ -73,8 +77,8 @@ class SearchService:
         return ranked
 
     # ------------------------------------------------------------------
-    def _rerank(self, client, query: str, candidates: List[dict]) -> List[dict]:
-        if not candidates or not self.settings.data.openai_api_key:
+    def _rerank(self, client, query: str, candidates: List[dict], api_key: str) -> List[dict]:
+        if not candidates or not api_key:
             return candidates
 
         payload = {
@@ -122,6 +126,38 @@ class SearchService:
         except Exception as exc:  # pragma: no cover - network or parsing issues
             LOGGER.warning("GPT rerank fallback: %s", exc)
             return candidates
+
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _decorate(item: dict) -> dict:
+        text = (item.get("text") or "").strip()
+        snippet = text[:280].strip()
+        code = item.get("code", "")
+        part = item.get("part") or ""
+        chapter = item.get("chapter") or ""
+        article = item.get("article") or ""
+        clause = item.get("clause") or ""
+        citation_parts = [code]
+        if part:
+            citation_parts.append(f"ч. {part}")
+        if chapter:
+            citation_parts.append(f"гл. {chapter}")
+        if article:
+            citation_parts.append(f"ст. {article}")
+        if clause:
+            citation_parts.append(f"п. {clause}")
+        citation = ", ".join(filter(None, citation_parts))
+        return {
+            "title": item.get("heading") or item.get("title") or "Юридическая норма",
+            "summary": item.get("summary") or snippet,
+            "score": round(float(item.get("score", 0.0)), 4),
+            "snippet": snippet,
+            "citation": citation,
+            "source": item.get("source"),
+            "article": article,
+            "chapter": chapter,
+            "code": code,
+        }
 
 
 __all__ = ["SearchService", "SearchRequest", "SearchResponse"]

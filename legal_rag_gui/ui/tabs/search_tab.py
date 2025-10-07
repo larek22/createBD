@@ -61,14 +61,17 @@ class SearchTab(QtWidgets.QWidget):
         html_parts = []
         for item in results:
             title = item.get("title", "Без названия")
-            article = item.get("article", "—")
             summary = item.get("summary", "")
-            text = item.get("text", "")[:600]
+            snippet = item.get("snippet", "")
+            citation = item.get("citation", "")
             score = item.get("score", 0.0)
             html_parts.append(
-                f"<div style='border:1px solid #555;border-radius:8px;padding:10px;margin:6px 0;'>"
-                f"<b>{title}</b> · Статья {article} · Score: {score:.3f}<br>"
-                f"<i>{summary}</i><br><pre style='white-space:pre-wrap;font-family:inherit'>{text}</pre></div>"
+                "<div style='border:1px solid #555;border-radius:8px;padding:10px;margin:6px 0;'>"
+                f"<b>{title}</b><br>"
+                f"<small>{citation} · релевантность {score:.3f}</small><br>"
+                f"<i>{summary}</i>"
+                f"<pre style='white-space:pre-wrap;font-family:inherit;margin-top:6px'>{snippet}</pre>"
+                "</div>"
             )
         self.results_browser.setHtml("".join(html_parts))
 

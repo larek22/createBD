@@ -14,7 +14,7 @@ if __package__ in (None, ""):
 import httpx
 from PySide6 import QtCore, QtGui, QtWidgets
 
-from .backend import server  # ensures FastAPI app is importable when uvicorn runs
+from backend import server  # ensures FastAPI app is importable when uvicorn runs
 from .utils.backend_launcher import BackendProcessManager
 from .utils.config import SettingsStore
 from .utils.logger import configure_logging
@@ -70,8 +70,7 @@ class BackendClient(QtCore.QObject):
             resp = await self._post("/search", payload)
             resp.raise_for_status()
             data = resp.json()
-            cases = data.get("cases", [])
-            items = [{"title": c.get("name"), "summary": c.get("details"), "article": c.get("name"), "score": c.get("score", 0.0)} for c in cases]
+            items = data.get("items", [])
             self.search_ready.emit(items)
         except Exception as exc:
             self.search_failed.emit(str(exc))

@@ -6,6 +6,8 @@ from types import SimpleNamespace
 
 import pytest
 
+pytest.importorskip("httpx")
+
 sys.path.append(str(Path(__file__).resolve().parents[2]))
 
 from legal_rag_gui.utils.backend_launcher import BackendProcessManager

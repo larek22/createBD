@@ -1,3 +1,7 @@
+import pytest
+
+pytest.importorskip("fastapi")
+
 from legal_rag_gui.backend.server import settings
 
 
