@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable, List, Sequence
 
@@ -21,6 +21,7 @@ class Article:
     chapter: str | None = None
 
     def to_payload(self, *, code: str, title: str, source: Path) -> dict:
+        created = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
         return {
             "code": code,
             "title": title,
@@ -30,7 +31,7 @@ class Article:
             "text": self.body,
             "heading": self.heading,
             "source": str(source),
-            "created_at": datetime.utcnow().isoformat() + "Z",
+            "created_at": created,
         }
 
 
