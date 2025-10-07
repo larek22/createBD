@@ -110,7 +110,7 @@ class BackendProcessManager:
 
     def _is_alive(self) -> bool:
         try:
-            response = httpx.get(f"{self.base_url}/status", timeout=0.5)
+            response = httpx.get(f"{self.base_url}/health", timeout=0.5)
             return response.status_code == 200
         except Exception:
             return False

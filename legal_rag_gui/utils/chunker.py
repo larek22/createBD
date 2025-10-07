@@ -26,6 +26,7 @@ class Article:
             "title": title,
             "article": self.identifier,
             "chapter": self.chapter,
+            "part": None,
             "text": self.body,
             "heading": self.heading,
             "source": str(source),

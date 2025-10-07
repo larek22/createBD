@@ -1,14 +1,10 @@
 from __future__ import annotations
 
-from types import SimpleNamespace
-import sys
 from pathlib import Path
-import types
+import sys
+from types import SimpleNamespace
 
 import pytest
-
-dummy_httpx = types.SimpleNamespace(get=lambda *_, **__: None)
-sys.modules.setdefault("httpx", dummy_httpx)
 
 sys.path.append(str(Path(__file__).resolve().parents[2]))
 

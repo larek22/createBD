@@ -4,7 +4,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, List
+from typing import List
 
 from pydantic import BaseModel
 
@@ -58,6 +58,9 @@ class IngestService:
 
     # ------------------------------------------------------------------
     def upsert(self, result: IngestResult, request: IngestRequest) -> int:
+        if not result.articles:
+            LOGGER.info("Nothing to upsert – empty result set")
+            return 0
         qdrant = QdrantManager(self.settings.data.qdrant_url, self.settings.data.qdrant_api_key or None)
         client = get_client(self.settings.data.openai_api_key)
         texts = [article.body for article in result.articles]
@@ -65,15 +68,36 @@ class IngestService:
         LOGGER.info("Creating embeddings for %d articles", len(texts))
         body_vecs = client.embed(texts)
         title_vecs = client.embed(titles)
-        payloads: Iterable[VectorPayload] = []
         items: List[VectorPayload] = []
-        for article, bvec, tvec, enrich in zip(result.articles, body_vecs, title_vecs, result.enriched):
-            payload = article.to_payload(code=request.code, title=request.title, source=Path(request.files[0]))
-            payload.update(enrich)
-            payload.update({"version": request.version or "", "append_mode": request.append_mode})
-            items.append(VectorPayload(id_source=f"{request.code}:{article.identifier}:{article.chapter}", title_vec=tvec, body_vec=bvec, payload=payload))
-        payloads = items
-        qdrant.upsert(payloads)
+        for idx, (article, bvec, tvec, enrich) in enumerate(
+            zip(result.articles, body_vecs, title_vecs, result.enriched), start=1
+        ):
+            payload = article.to_payload(
+                code=request.code,
+                title=request.title,
+                source=Path(request.files[0]),
+            )
+            payload.update(
+                {
+                    "version": request.version or "",
+                    "append_mode": request.append_mode,
+                    "status": "действует",
+                    "effective_from": None,
+                    "effective_to": None,
+                    "summary": enrich.get("summary", ""),
+                    "keywords": enrich.get("keywords", []),
+                    "chunk_id": f"{article.identifier}:{idx}",
+                }
+            )
+            items.append(
+                VectorPayload(
+                    id_source=f"{request.code}:{article.identifier}:{idx}",
+                    title_vec=tvec,
+                    body_vec=bvec,
+                    payload=payload,
+                )
+            )
+        qdrant.upsert_batch(items)
         LOGGER.info("Upserted %d points", len(items))
         return len(items)
 

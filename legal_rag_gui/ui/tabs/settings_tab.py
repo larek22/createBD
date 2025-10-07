@@ -22,7 +22,7 @@ class SettingsTab(QtWidgets.QWidget):
 
         self.openai_edit = QtWidgets.QLineEdit(self.settings.data.openai_api_key)
         self.openai_edit.setEchoMode(QtWidgets.QLineEdit.Password)
-        self.openai_edit.setToolTip("Ключ нужен для GPT-4.1 и GPT-5-nano. Мы сохраняем его только на твоём компьютере.")
+        self.openai_edit.setToolTip("Ключ нужен для GPT-4.1 и GPT-4.1-mini. Мы сохраняем его только на твоём компьютере.")
 
         self.qdrant_url_edit = QtWidgets.QLineEdit(self.settings.data.qdrant_url)
         self.qdrant_url_edit.setToolTip("URL локального или облачного Qdrant. Например: http://localhost:6333")

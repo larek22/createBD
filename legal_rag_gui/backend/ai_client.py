@@ -44,7 +44,7 @@ class OpenAIManager:
         vectors = [item["embedding"] for item in data.get("data", [])]
         return vectors
 
-    def summarize(self, text: str, *, model: str = "gpt-5-nano") -> str:
+    def summarize(self, text: str, *, model: str = "gpt-4.1-mini") -> str:
         prompt = (
             "Сделай короткую (≤160 символов) аннотацию нормы. Без вводных слов,"
             " только суть."
@@ -65,7 +65,7 @@ class OpenAIManager:
         except Exception:
             return ""
 
-    def chat(self, messages: Sequence[dict], *, model: str = "gpt-4.1-mini") -> str:
+    def chat(self, messages: Sequence[dict], *, model: str = "gpt-4.1") -> str:
         data = self._post(
             "/chat/completions",
             {

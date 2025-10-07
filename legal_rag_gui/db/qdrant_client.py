@@ -8,10 +8,19 @@ from typing import Iterable, List, Optional
 
 try:  # pragma: no cover - optional dependency during tests
     from qdrant_client import QdrantClient
-    from qdrant_client.http import models as qm
+    from qdrant_client.http.models import (
+        Distance,
+        NamedVectorParams,
+        OptimizersConfigDiff,
+        PointStruct,
+        ScalarQuantization,
+        ScalarQuantizationConfig,
+        ScalarType,
+        VectorParams,
+    )
 except Exception:  # pragma: no cover
     QdrantClient = None  # type: ignore
-    qm = None  # type: ignore
+    Distance = NamedVectorParams = OptimizersConfigDiff = PointStruct = ScalarQuantization = ScalarQuantizationConfig = ScalarType = VectorParams = None  # type: ignore
 
 LOGGER = logging.getLogger(__name__)
 
@@ -46,26 +55,48 @@ class QdrantManager:
         if self.client.collection_exists(name):
             return
         LOGGER.info("Creating Qdrant collection %s", name)
-        vectors_config = {
-            "title_vec": qm.VectorParams(size=VECTOR_SIZE, distance=qm.Distance.COSINE),
-            "body_vec": qm.VectorParams(size=VECTOR_SIZE, distance=qm.Distance.COSINE),
-        }
-        self.client.create_collection(collection_name=name, vectors_config=vectors_config)
+        vectors_config = NamedVectorParams(
+            {
+                "title_vec": VectorParams(size=VECTOR_SIZE, distance=Distance.COSINE),
+                "body_vec": VectorParams(size=VECTOR_SIZE, distance=Distance.COSINE),
+            }
+        )
+        quant = ScalarQuantization(
+            scalar=ScalarQuantizationConfig(type=ScalarType.INT8, always_ram=True)
+        )
+        self.client.create_collection(
+            collection_name=name,
+            vectors_config=vectors_config,
+            optimizers_config=OptimizersConfigDiff(default_segment_number=2),
+            quantization_config=quant,
+        )
 
     # ------------------------------------------------------------------
     def upsert(self, points: Iterable[VectorPayload], name: str = COLLECTION_NAME) -> None:
+        self.upsert_batch(points, name=name)
+
+    def upsert_batch(
+        self,
+        points: Iterable[VectorPayload],
+        *,
+        name: str = COLLECTION_NAME,
+        batch_size: int = 512,
+    ) -> None:
         self.ensure_collection(name)
-        qpoints = []
-        for p in points:
-            qpoints.append(
-                qm.PointStruct(
-                    id=p.point_id,
-                    vector={"title_vec": p.title_vec, "body_vec": p.body_vec},
-                    payload=p.payload,
+        buffer: List[PointStruct] = []
+        for payload in points:
+            buffer.append(
+                PointStruct(
+                    id=payload.point_id,
+                    vector={"title_vec": payload.title_vec, "body_vec": payload.body_vec},
+                    payload=payload.payload,
                 )
             )
-        if qpoints:
-            self.client.upsert(collection_name=name, wait=True, points=qpoints)
+            if len(buffer) >= batch_size:
+                self.client.upsert(collection_name=name, wait=True, points=buffer)
+                buffer.clear()
+        if buffer:
+            self.client.upsert(collection_name=name, wait=True, points=buffer)
 
     # ------------------------------------------------------------------
     def search(

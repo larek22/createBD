@@ -2,10 +2,14 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import sys
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any, Callable
+
+if __package__ in (None, ""):
+    sys.path.append(os.path.dirname(__file__))
+    __package__ = "legal_rag_gui"
 
 import httpx
 from PySide6 import QtCore, QtGui, QtWidgets
@@ -37,6 +41,8 @@ class BackendClient(QtCore.QObject):
     tests_failed = QtCore.Signal(str)
     chat_ready = QtCore.Signal(str)
     chat_failed = QtCore.Signal(str)
+    health_ready = QtCore.Signal(dict)
+    health_failed = QtCore.Signal(str)
 
     def __init__(self, settings: SettingsStore, parent: QtCore.QObject | None = None) -> None:
         super().__init__(parent)
@@ -46,6 +52,9 @@ class BackendClient(QtCore.QObject):
 
     async def _post(self, path: str, payload: dict) -> httpx.Response:
         return await self._client.post(path, json=payload)
+
+    async def _get(self, path: str) -> httpx.Response:
+        return await self._client.get(path)
 
     async def ingest(self, payload: dict) -> None:
         try:
@@ -87,6 +96,23 @@ class BackendClient(QtCore.QObject):
             self.chat_ready.emit(data.get("answer", ""))
         except Exception as exc:
             self.chat_failed.emit(str(exc))
+
+    async def check_health(self) -> None:
+        try:
+            backend_resp = await self._get("/health")
+            backend_resp.raise_for_status()
+            qdrant_resp = await self._get("/health/qdrant")
+            qdrant_resp.raise_for_status()
+            openai_resp = await self._get("/health/openai")
+            openai_resp.raise_for_status()
+            data = {
+                "backend": backend_resp.json(),
+                "qdrant": qdrant_resp.json(),
+                "openai": openai_resp.json(),
+            }
+            self.health_ready.emit(data)
+        except Exception as exc:
+            self.health_failed.emit(str(exc))
 
 
 class AsyncTask(QtCore.QRunnable):
@@ -176,6 +202,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.backend.tests_failed.connect(lambda err: self.log_box.appendPlainText(f"Ошибка тестов: {err}"))
         self.backend.chat_ready.connect(self.chat_tab.show_answer)
         self.backend.chat_failed.connect(lambda err: self.log_box.appendPlainText(f"Ошибка GPT: {err}"))
+        self.backend.health_ready.connect(self._show_health)
+        self.backend.health_failed.connect(lambda err: self.log_box.appendPlainText(f"❌ Проверка не прошла: {err}"))
 
     # ------------------------------------------------------------------
     def _submit(self, coro: Callable[[], Any]) -> None:
@@ -215,7 +243,24 @@ class MainWindow(QtWidgets.QMainWindow):
             self.log_box.appendPlainText("❌ Backend недоступен. Проверьте лог backend.log")
             return
         self.log_box.appendPlainText("⏳ Проверяем подключение…")
-        self._submit(lambda: self.backend.search({"query": "ping", "top_k": 1}))
+        self._submit(lambda: self.backend.check_health())
+
+    def _show_health(self, data: dict) -> None:
+        backend = data.get("backend", {})
+        qdrant = data.get("qdrant", {})
+        openai = data.get("openai", {})
+        self.log_box.appendPlainText(
+            "✅ Backend отвечает: " + ("ok" if backend.get("ok", True) else str(backend))
+        )
+        if qdrant.get("ok"):
+            collections = ", ".join(qdrant.get("collections", []) or []) or "нет коллекций"
+            self.log_box.appendPlainText(f"✅ Qdrant готов ({collections})")
+        else:
+            self.log_box.appendPlainText(f"❌ Qdrant: {qdrant.get('error', 'неизвестная ошибка')}")
+        if openai.get("ok"):
+            self.log_box.appendPlainText("✅ OpenAI ключ найден")
+        else:
+            self.log_box.appendPlainText("⚠️ OpenAI ключ не задан — GPT-функции будут ограничены")
 
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:  # pragma: no cover - GUI shutdown
         self.backend_manager.shutdown()
