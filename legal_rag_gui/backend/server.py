@@ -8,10 +8,10 @@ from typing import AsyncIterator
 from fastapi import FastAPI, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from qdrant_client import QdrantClient
 
 from ..utils.config import SettingsStore
 from ..utils.logger import configure_logging
+from ..db.qdrant_client import QdrantManager
 from .ai_client import get_client
 from .ingest import IngestRequest, IngestService
 from .search import SearchRequest, SearchResponse, SearchService
@@ -51,8 +51,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-qdrant = QdrantClient(url=settings.qdrant_url, api_key=settings.qdrant_api_key)
-
 _ingest = IngestService(_store)
 _search = SearchService(_store)
 _tests = TestService(_store)
@@ -66,8 +64,10 @@ def health() -> dict:
 @app.get("/health/qdrant")
 def health_qdrant() -> dict:
     try:
-        collections = qdrant.get_collections()
-        return {"ok": True, "collections": [c.name for c in collections.collections]}
+        manager = QdrantManager(settings.qdrant_url, settings.qdrant_api_key or None)
+        collections = manager.list_collections()
+        manager.close()
+        return {"ok": True, "collections": collections}
     except Exception as exc:  # pragma: no cover - depends on external service
         LOGGER.warning("Qdrant health failed: %s", exc)
         return {"ok": False, "error": str(exc)}

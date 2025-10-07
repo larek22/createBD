@@ -62,45 +62,48 @@ class IngestService:
             LOGGER.info("Nothing to upsert – empty result set")
             return 0
         qdrant = QdrantManager(self.settings.data.qdrant_url, self.settings.data.qdrant_api_key or None)
-        client = get_client(self.settings.data.openai_api_key)
-        texts = [article.body for article in result.articles]
-        titles = [article.heading for article in result.articles]
-        LOGGER.info("Creating embeddings for %d articles", len(texts))
-        body_vecs = client.embed(texts)
-        title_vecs = client.embed(titles)
-        items: List[VectorPayload] = []
-        for idx, (article, bvec, tvec, enrich) in enumerate(
-            zip(result.articles, body_vecs, title_vecs, result.enriched), start=1
-        ):
-            payload = article.to_payload(
-                code=request.code,
-                title=request.title,
-                source=Path(request.files[0]),
-            )
-            payload.update(
-                {
-                    "version": request.version or "",
-                    "append_mode": request.append_mode,
-                    "status": "действует",
-                    "effective_from": None,
-                    "effective_to": None,
-                    "clause": None,
-                    "summary": enrich.get("summary", ""),
-                    "keywords": enrich.get("keywords", []),
-                    "chunk_id": f"{article.identifier}:{idx}",
-                }
-            )
-            items.append(
-                VectorPayload(
-                    id_source=f"{request.code}:{article.identifier}:{idx}",
-                    title_vec=tvec,
-                    body_vec=bvec,
-                    payload=payload,
+        try:
+            client = get_client(self.settings.data.openai_api_key)
+            texts = [article.body for article in result.articles]
+            titles = [article.heading for article in result.articles]
+            LOGGER.info("Creating embeddings for %d articles", len(texts))
+            body_vecs = client.embed(texts)
+            title_vecs = client.embed(titles)
+            items: List[VectorPayload] = []
+            for idx, (article, bvec, tvec, enrich) in enumerate(
+                zip(result.articles, body_vecs, title_vecs, result.enriched), start=1
+            ):
+                payload = article.to_payload(
+                    code=request.code,
+                    title=request.title,
+                    source=Path(request.files[0]),
                 )
-            )
-        qdrant.upsert_batch(items)
-        LOGGER.info("Upserted %d points", len(items))
-        return len(items)
+                payload.update(
+                    {
+                        "version": request.version or "",
+                        "append_mode": request.append_mode,
+                        "status": "действует",
+                        "effective_from": None,
+                        "effective_to": None,
+                        "clause": None,
+                        "summary": enrich.get("summary", ""),
+                        "keywords": enrich.get("keywords", []),
+                        "chunk_id": f"{article.identifier}:{idx}",
+                    }
+                )
+                items.append(
+                    VectorPayload(
+                        id_source=f"{request.code}:{article.identifier}:{idx}",
+                        title_vec=tvec,
+                        body_vec=bvec,
+                        payload=payload,
+                    )
+                )
+            qdrant.upsert_batch(items)
+            LOGGER.info("Upserted %d points", len(items))
+            return len(items)
+        finally:
+            qdrant.close()
 
 
 __all__ = ["IngestRequest", "IngestService", "IngestResult"]

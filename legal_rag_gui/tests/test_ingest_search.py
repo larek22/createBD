@@ -58,6 +58,9 @@ class StubQdrant:
         ranked = sorted(self.storage, key=score, reverse=True)[:limit]
         return [FakePoint(record["payload"]) for record in ranked]
 
+    def close(self) -> None:
+        return
+
 
 @pytest.fixture(autouse=True)
 def reset_storage(monkeypatch):

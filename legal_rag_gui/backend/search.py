@@ -39,20 +39,23 @@ class SearchService:
         qdrant = QdrantManager(self.settings.data.qdrant_url, self.settings.data.qdrant_api_key or None)
         LOGGER.info("Search query: %s", query)
 
-        embedding = client.embed([query])
-        if not embedding:
-            return SearchResponse(items=[])
-        title_vec = embedding[0]
-        body_vec = embedding[0]
+        try:
+            embedding = client.embed([query])
+            if not embedding:
+                return SearchResponse(items=[])
+            title_vec = embedding[0]
+            body_vec = embedding[0]
 
-        title_points = qdrant.search(title_vec, vector_name="title_vec", limit=max(20, request.top_k * 4))
-        body_points = qdrant.search(body_vec, vector_name="body_vec", limit=max(40, request.top_k * 6))
+            title_points = qdrant.search(title_vec, vector_name="title_vec", limit=max(20, request.top_k * 4))
+            body_points = qdrant.search(body_vec, vector_name="body_vec", limit=max(40, request.top_k * 6))
 
-        combined = self._combine_rrf(title_points, body_points)
-        top_candidates = combined[: max(12, request.top_k * 2)]
-        reranked = self._rerank(client, query, top_candidates, api_key)
-        final = [self._decorate(item) for item in reranked[: request.top_k]]
-        return SearchResponse(items=final)
+            combined = self._combine_rrf(title_points, body_points)
+            top_candidates = combined[: max(12, request.top_k * 2)]
+            reranked = self._rerank(client, query, top_candidates, api_key)
+            final = [self._decorate(item) for item in reranked[: request.top_k]]
+            return SearchResponse(items=final)
+        finally:
+            qdrant.close()
 
     # ------------------------------------------------------------------
     @staticmethod
