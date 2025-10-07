@@ -18,22 +18,25 @@ from .search import SearchRequest, SearchResponse, SearchService
 from .test_suite import QualityReport, TestRequest, TestService
 
 
+_store = SettingsStore()
+
+
 class Settings(BaseModel):
-    qdrant_url: str
-    qdrant_api_key: str | None = None
-    openai_api_key: str | None = None
-    port: int = 8765
+    qdrant_url: str = os.getenv("QDRANT_URL", _store.data.qdrant_url or "http://localhost:6333")
+    qdrant_api_key: str | None = os.getenv("QDRANT_API_KEY") or (_store.data.qdrant_api_key or None)
+    openai_api_key: str | None = os.getenv("OPENAI_API_KEY") or (_store.data.openai_api_key or None)
+    app_port: int = int(os.getenv("APP_PORT", str(_store.data.last_backend_port or 8765)))
 
 
 configure_logging()
 LOGGER = logging.getLogger(__name__)
 
-_store = SettingsStore()
-settings = Settings(
-    qdrant_url=os.getenv("QDRANT_URL", _store.data.qdrant_url),
-    qdrant_api_key=os.getenv("QDRANT_API_KEY", _store.data.qdrant_api_key or None),
-    openai_api_key=os.getenv("OPENAI_API_KEY", _store.data.openai_api_key or None),
-    port=int(os.getenv("APP_PORT", str(_store.data.last_backend_port))),
+settings = Settings()
+_store.update(
+    qdrant_url=settings.qdrant_url,
+    qdrant_api_key=settings.qdrant_api_key or "",
+    openai_api_key=settings.openai_api_key or "",
+    last_backend_port=settings.app_port,
 )
 
 app = FastAPI(title="Legal RAG Studio Backend", version="1.0")

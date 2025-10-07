@@ -1,15 +1,18 @@
 from __future__ import annotations
 
-import asyncio
-import logging
+# --- make runnable both as module and as file ---
 import os
 import sys
-from dataclasses import dataclass
-from typing import Any, Callable
 
 if __package__ in (None, ""):
     sys.path.append(os.path.dirname(__file__))
     __package__ = "legal_rag_gui"
+# ------------------------------------------------
+
+import asyncio
+import logging
+from dataclasses import dataclass
+from typing import Any, Callable
 
 import httpx
 from PySide6 import QtCore, QtGui, QtWidgets
